@@ -87,6 +87,11 @@ class HFEngine:
             output_logits=True,  # RAW logits — output_scores is post temperature/top-p
             # and would inflate the engine<->learner gap from ~1e-5 to ~0.8 nats/token.
         )
+        # -> CPU here: Trajectories are device-neutral by contract. They cross
+        # thread/queue/process boundaries (MPS tensors can't even be IPC'd) and
+        # the learner may live on a DIFFERENT device — it re-uploads to its own.
+        # Also frees engine memory across oversampling rounds. Big math (the
+        # log_softmax below) stays on device; only bookkeeping/storage moves.
         gen = out.sequences[:, t_max:].cpu()  # (B, T_gen) — pad-filled past each row's eos
 
         # Behavior logprobs, one step at a time to avoid a (B, T_gen, V) buffer
