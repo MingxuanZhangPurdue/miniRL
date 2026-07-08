@@ -235,8 +235,8 @@ miniRL/
 │
 ├── tests/                       # correctness tests (see §8)
 └── docs/                        # one short note per topic. Exist: sync_training.md,
-                                 #   async_training.md, precision.md, agentic_rl.md;
-                                 #   per-algorithm math notes + production_gap.md to come
+                                 #   async_training.md, precision.md, agentic_rl.md,
+                                 #   packing.md; algo math notes + production_gap.md to come
 ```
 
 ## 4. Core data contract
@@ -421,6 +421,9 @@ The sync controller is a degenerate case of the async one (1 worker,
 readable in five minutes.
 
 ### Sequence packing (planned; slime's THD format in miniature)
+
+Full implementation design — file-by-file changes, worked example, testing
+strategy: **docs/packing.md**.
 
 RL batches have brutal length variance, so padded (B, T) rectangles are
 mostly pad — slime doesn't even have a padded path: every Megatron microbatch
