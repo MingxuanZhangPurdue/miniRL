@@ -21,7 +21,6 @@ gradient-equivalence test, and cf. slime's num_tokens / sum_of_sample_mean).
 ================================================================================
 """
 
-import torch
 from torch import Tensor
 
 
@@ -41,6 +40,13 @@ def aggregate_loss(
     """token:    sum(loss) / denom,           denom = total masked tokens in the MINIBATCH
     sequence: sum_b(mean_t loss_b) / denom, denom = total sequences in the MINIBATCH
     Pass the minibatch-global denom when splitting into microbatches (trainer does).
+
+    NOTE on the (deliberately) redundant `* mask`: loss fns already return maps
+    that are zero outside loss_mask (their contract). But the mask is needed
+    HERE regardless — the denominators (which positions COUNT) can't be read
+    off a pre-zeroed map — so re-applying it costs one elementwise op and makes
+    this function correct even for a caller that didn't pre-mask. Each module
+    upholds its own invariant instead of trusting the other file's convention.
     """
     if mode == "token":
         denom = mask.sum().clamp(min=1) if denom is None else denom

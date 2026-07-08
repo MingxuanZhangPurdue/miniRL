@@ -29,14 +29,28 @@ from torch import Tensor
 
 
 def _group_stats(rewards: Tensor, group_ids: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    """Per-row group mean/std/count. rewards (B,), group_ids (B,) -> three (B,)."""
-    uniq, inv = torch.unique(group_ids, return_inverse=True)  # (G,), (B,)
-    g = uniq.numel()
+    """Per-row group mean/std/count. rewards (B,), group_ids (B,) -> three (B,).
+
+    Shape note: P = number of GROUPS (= B/G when no group was filtered), NOT
+    the group size G of the notation legend. inv (B,) maps each row to its
+    group's slot in the (P,) stats tensors.
+
+    The whole trick: SCATTER-reduce down (index_add_: B rows -> P group slots),
+    then GATHER back up (stats[inv]: integer indexing, out[b] = stats[inv[b]],
+    fanning P values out to B rows). stats[inv] is NOT broadcasting — the
+    row->group assignment is data-dependent, which shape rules can't express;
+    only an index tensor can.
+    """
+    uniq, inv = torch.unique(group_ids, return_inverse=True)  # (P,), (B,)
+    n_groups = uniq.numel()  # P
     ones = torch.ones_like(rewards)
-    count = torch.zeros(g).index_add_(0, inv, ones)  # (G,)  siblings per group
-    mean = torch.zeros(g).index_add_(0, inv, rewards) / count  # (G,)  the BASELINE
-    sq = torch.zeros(g).index_add_(0, inv, (rewards - mean[inv]) ** 2)  # (G,)
-    std = (sq / (count - 1).clamp(min=1)).sqrt()  # (G,)  unbiased; 0 if count==1
+    count = torch.zeros(n_groups).index_add_(0, inv, ones)  # (P,)  siblings per group.
+    #   == G today, but DERIVED from the data, not assumed: make_batch's singleton
+    #   fallback (rows without group_id) has count=1, and partial rollouts /
+    #   agentic fan-out / per-sample rejection all produce ragged groups later.
+    mean = torch.zeros(n_groups).index_add_(0, inv, rewards) / count  # (P,)  the BASELINE
+    sq = torch.zeros(n_groups).index_add_(0, inv, (rewards - mean[inv]) ** 2)  # (P,)
+    std = (sq / (count - 1).clamp(min=1)).sqrt()  # (P,)  unbiased; 0 if count==1
     return mean[inv], std[inv], count[inv]  # each (B,) — scattered back to rows
 
 
