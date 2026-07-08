@@ -1,0 +1,98 @@
+"""Trajectories -> padded Batch, and Batch -> mini/micro slices.
+
+The collation layer between rollout land and training land
+(docs/sync_training.md §3). RIGHT-padding here (training has no generation
+constraint) vs the engine's LEFT-padding (prompts must touch the first
+generated token) — the classic pair of conventions worth one comment each.
+"""
+
+import torch
+from torch import Tensor
+
+from minirl.algos.advantage import degenerate_group_mask, grpo_advantages
+from minirl.rollout.types import Batch, Trajectory
+
+
+def make_batch(trajs: list[Trajectory], pad_id: int, norm_std: bool = True) -> tuple[Batch, dict]:
+    """Collate B trajectories into one right-padded Batch with GRPO advantages.
+
+    Expects traj.meta["group_id"] (set by rollout/sampling.collect_groups);
+    rows without one become singleton groups (advantage 0 — harmless for SFT).
+
+    Returns (batch, stats) where stats carries collation health metrics
+    (frac_degenerate_groups is the key GRPO signal — docs/sync_training.md §4).
+    """
+    b = len(trajs)
+    t_max = max(t.input_ids.numel() for t in trajs)
+
+    input_ids = torch.full((b, t_max), pad_id, dtype=torch.long)  # (B, T)
+    attention_mask = torch.zeros((b, t_max), dtype=torch.bool)  # (B, T)
+    loss_mask = torch.zeros((b, t_max), dtype=torch.bool)  # (B, T)
+    behavior_logprobs = torch.zeros((b, t_max))  # (B, T) f32
+    rewards = torch.tensor([tr.reward for tr in trajs], dtype=torch.float32)  # (B,)
+    group_ids = torch.tensor(
+        [tr.meta.get("group_id", i) for i, tr in enumerate(trajs)], dtype=torch.long
+    )  # (B,)
+
+    for i, tr in enumerate(trajs):
+        n = tr.input_ids.numel()
+        input_ids[i, :n] = tr.input_ids
+        attention_mask[i, :n] = True
+        loss_mask[i, :n] = tr.loss_mask
+        behavior_logprobs[i, :n] = tr.logprobs  # already 0 where loss_mask False
+
+    # Per-row scalar advantage, broadcast onto response tokens only.
+    adv_row = grpo_advantages(rewards, group_ids, norm_std=norm_std)  # (B,)
+    advantages = adv_row.unsqueeze(-1) * loss_mask  # (B, T)
+
+    stats = {
+        "batch_size": b,
+        "max_len": t_max,
+        "response_tokens": int(loss_mask.sum()),
+        # fraction of the (B, T) rectangle that is pad — the metric that will
+        # one day justify pack_batch (DESIGN §6, sequence packing)
+        "frac_padding": 1.0 - attention_mask.float().mean().item(),
+        "reward_mean": rewards.mean().item(),
+        "reward_std": rewards.std().item() if b > 1 else 0.0,
+        "frac_degenerate_groups": degenerate_group_mask(rewards, group_ids).float().mean().item(),
+    }
+    batch = Batch(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        loss_mask=loss_mask,
+        behavior_logprobs=behavior_logprobs,
+        advantages=advantages,
+        rewards=rewards,
+        group_ids=group_ids,
+    )
+    return batch, stats
+
+
+def slice_batch(batch: Batch, idx: Tensor) -> Batch:
+    """Row-select every field (idx: (b,) int64), including the optional ones."""
+    maybe = lambda x: x[idx] if x is not None else None
+    return Batch(
+        input_ids=batch.input_ids[idx],
+        attention_mask=batch.attention_mask[idx],
+        loss_mask=batch.loss_mask[idx],
+        behavior_logprobs=batch.behavior_logprobs[idx],
+        advantages=batch.advantages[idx],
+        rewards=batch.rewards[idx],
+        group_ids=batch.group_ids[idx],
+        old_logprobs=maybe(batch.old_logprobs),
+        ref_logprobs=maybe(batch.ref_logprobs),
+    )
+
+
+def iter_minibatches(batch: Batch, minibatch_size: int, generator: torch.Generator):
+    """Shuffled minibatches for one ppo epoch (seeded -> reproducible)."""
+    perm = torch.randperm(batch.input_ids.shape[0], generator=generator)  # (B,)
+    for start in range(0, len(perm), minibatch_size):
+        yield slice_batch(batch, perm[start : start + minibatch_size])
+
+
+def iter_microbatches(batch: Batch, micro_batch_size: int):
+    """Contiguous grad-accumulation slices of a minibatch (no shuffling)."""
+    b = batch.input_ids.shape[0]
+    for start in range(0, b, micro_batch_size):
+        yield slice_batch(batch, torch.arange(start, min(start + micro_batch_size, b)))

@@ -1,0 +1,19 @@
+[project]
+name = "minirl"
+version = "0.0.1"
+description = "A minimal post-training laboratory: SFT / DPO / RL / agentic RL on small open models"
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.12",
+    "transformers>=5.13",
+    "datasets",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+cuda = ["vllm"]        # rollout backend for real experiments (CUDA only)
+math = ["math-verify"] # symbolic answer grading (MATH-style labels); GSM8K needs none
+dev = ["pytest", "math-verify"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
