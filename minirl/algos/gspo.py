@@ -12,6 +12,8 @@ LOSS (notation: see grpo.py; new symbol s_i = SEQUENCE-level ratio):
     L    = per-SEQUENCE mean of L_t     (loss_agg="seq_mean")
 
 Companion to:
+  - notes/grpo_to_gspo_derivation.md  (THE derivation: why the true sequence
+    IS weight explodes, the 1/|y| variance shrinkage, the bias trade)
   - rl_notes: gspo_loss_explained.py  (the annotated version of exactly this)
   - grpo.py                           (GSPO = GRPO with ONE change: the ratio)
 

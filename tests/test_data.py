@@ -4,6 +4,8 @@ Uses the real Qwen3-0.6B tokenizer (cached, no model load) for chat.py, and
 a fake in-memory dataset for prompts.py / sft.py so they stay CPU-fast.
 """
 
+import os
+
 import pytest
 import torch
 from transformers import AutoTokenizer
@@ -12,7 +14,11 @@ from minirl.data.chat import encode_conversation, encode_prompt
 from minirl.data.prompts import gsm8k_row, hf_prompt_source
 from minirl.data.sft import sft_batches
 
-MODEL = "Qwen/Qwen3-0.6B"
+# Override to vet a NEW model family's chat template + assistant masking:
+#   MINIRL_TEST_MODEL=org/name pytest tests/test_data.py tests/test_hf_engine.py
+# (NOTE: the substring assertions in the mask tests assume a Qwen-style
+# template; a new family may need its own expected strings.)
+MODEL = os.environ.get("MINIRL_TEST_MODEL", "Qwen/Qwen3-0.6B")
 
 
 @pytest.fixture(scope="module")

@@ -23,6 +23,8 @@ NOTATION (the legend for ALL algos/ loss files; siblings list only their deltas)
     eps / eps_hi = lower / upper clip deltas from 1  (ratio window [1-eps, 1+eps_hi])
 
 Companion to:
+  - notes/ppo_to_grpo_derivation.md   (THE derivation: baseline unbiasedness,
+    the (1-1/G) RLOO relation, Dr. GRPO's two bias critiques, clip-higher)
   - rl_notes: grpo_loss_explained.py  (the annotated single-file pipeline this
     file productionizes — same clipped surrogate, same k3 KL, same group
     advantage; read that for the full STEP 0-3 walkthrough + PPO contrast)

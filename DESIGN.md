@@ -1,16 +1,47 @@
 # miniRL — Design Document
 
-A minimal, pure-PyTorch post-training laboratory for small open-source LLMs.
-Default base model: **Qwen3-0.6B** — a boring, standard dense transformer
-(GQA/RoPE/RMSNorm) with first-class vLLM support and abundant community RLVR
-baselines to sanity-check results against. Exotic architectures (e.g. the
-hybrid linear-attention Qwen3.5-0.8B) are deliberately *not* the default: in a
-repo for learning RL, the model should be the most boring variable — they make
-a good transfer experiment later (Phase 4+). The goal is **understanding, not
+A minimal, pure-PyTorch post-training laboratory for small open-source LLMs —
+**model-agnostic by construction**: nothing in the stack knows the
+architecture; everything keys off one HF `model.name_or_path`, and trying a
+new family is a checkpoint string plus a test run
+(`MINIRL_TEST_MODEL=org/name pytest tests/test_hf_engine.py tests/test_data.py`
+— the engine-contract and chat-mask tests are the two model-sensitive spots,
+and both carry loud guards). Current default/starting point: **Qwen3-0.6B** —
+a boring, standard dense transformer (GQA/RoPE/RMSNorm) with first-class vLLM
+support and abundant community RLVR baselines to sanity-check against. More
+small families get added by trying them; exotic architectures (e.g. the
+hybrid linear-attention Qwen3.5-0.8B) are deliberately not first: in a repo
+for learning RL, the model should be the most boring variable. The goal is **understanding, not
 throughput**: every stage of modern post-training — SFT, DPO, RLVR, agentic RL,
 async RL, on-policy distillation — implemented in small, readable, robust files
 that together form a miniature version of production frameworks like
 [slime](https://github.com/THUDM/slime) and [verl](https://github.com/verl-project/verl).
+
+## 0. Status (updated 2026-07-08 — keep this section current)
+
+**Built and tested (58 passing tests, all CPU/MPS):** the full RLVR stack —
+`HFEngine` (rollouts on any device, exact behavior logprobs), losses
+grpo/gspo/cispo/sft as files + dapo/dr_grpo as named configs (`LOSSES`
+registry, algos/README.md), group advantages with pluggable `advantage_fn`,
+TIS, the three-mode reduce (`loss_agg`), dynamic sampling (`collect_groups`),
+`make_batch`, the generic `Trainer` (microbatch-exact, old-logprob recompute,
+NaN guard, AdamW-only), the tier-1 async controller (`fit_async` — there is
+no sync controller, by design), rewards (GSM8K math verifier + level-2 code
+sandbox), the data layer (chat templating with assistant-mask, HF prompt
+sources, SFT batching), and a working GSM8K GRPO recipe
+(`recipes/03_grpo_gsm8k.py`, smoke-tested on MPS end to end).
+
+**Decided and documented, not yet built:** VLLMEngine + NCCL weight sync +
+FSDP2 + placement (need the CUDA box; docs/precision.md, DESIGN §6), packing
+(docs/packing.md), agentic runners (docs/agentic_rl.md), RLOO, DPO
+(notes/dpo_derivation.md ready), on-policy distillation, eval harness,
+wandb logging, checkpoint/resume schedule.
+
+**Agreed build order:** SFT recipe → GSM8K RLVR at real scale (GPU) → DPO →
+agentic. PPO is a permanent non-goal (§ non-goals).
+
+**Housekeeping:** git repo has a remote (MingxuanZhangPurdue/miniRL) but NO
+commits yet — everything is uncommitted working tree.
 
 ## 1. Reference reports this repo follows
 
@@ -557,6 +588,10 @@ so the jump to slime/verl is documented, not just implied.
 4. slime: custom rollout functions — miniRL's `envs/multiturn.py` plays this role.
 
 ## 10. Roadmap
+
+(The original phase plan, kept as the target sequence. ACTUAL current state
+and the agreed build order live in §0 Status — trust §0 where they disagree;
+e.g. async landed before SFT, sync-controller and PPO rows are superseded.)
 
 | Phase | Deliverable | Exit criterion |
 |---|---|---|
