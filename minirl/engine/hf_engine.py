@@ -95,7 +95,7 @@ class HFEngine:
         gen = out.sequences[:, t_max:].cpu()  # (B, T_gen) — pad-filled past each row's eos
 
         # Behavior logprobs, one step at a time to avoid a (B, T_gen, V) buffer
-        # (V is ~250k for Qwen3.5). out.logits: tuple of T_gen tensors, (B, V).
+        # (V is ~152k for Qwen3). out.logits: tuple of T_gen tensors, (B, V).
         step_lps = [
             F.log_softmax(step.float(), dim=-1).gather(-1, gen[:, t : t + 1].to(self.device)).cpu()
             for t, step in enumerate(out.logits)
@@ -110,7 +110,7 @@ class HFEngine:
             n_gen = int(hits[0]) + 1 if len(hits) else gen.shape[1]
             trajectories.append(
                 Trajectory(
-                    input_ids=torch.cat([prompts[i].cpu(), gen[i, :n_gen]]),  # (T_i + n_gen,)
+                    input_ids=torch.cat([prompts[i].cpu(), gen[i, :n_gen]]),  # one row's (T,): T = prompt_len + response_len
                     loss_mask=torch.cat(
                         [torch.zeros(lens[i], dtype=torch.bool), torch.ones(n_gen, dtype=torch.bool)]
                     ),

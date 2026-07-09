@@ -17,10 +17,14 @@ NOTATION (the legend for ALL algos/ loss files; siblings list only their deltas)
     pi_old    policy at update start      (FROZEN)   A_i    group advantage, ONE scalar per
     pi_ref    frozen reference model      (FROZEN)          completion, broadcast to its
     pi_engine rollout engine's policy     (FROZEN)          tokens (advantage.py, STEP 2):
-    w_t       TIS weight = clamp(exp(logpi_old              A_i = (R_i - mean_grp)/(std_grp+eps)
-              - logpi_engine), lo, C)   (tis.py)     sg(.)  stop-gradient == .detach()
-    B = P*G total completions;  G = group size;  T = padded prompt+completion length
-    eps / eps_hi = lower / upper clip deltas from 1  (ratio window [1-eps, 1+eps_hi])
+    w_t       TIS weight = clamp(exp(logpi_old              A_i = (R_i - mean_group)
+              - logpi_engine), lo, hi)  (tis.py)                  / (std_group + eps_std)
+    sg(.)     stop-gradient == .detach()
+    B = P*G total completions;  P = prompts (= groups);  G = group size;
+    T = padded prompt+completion length;  |y_i| = completion i's token count;
+    lowercase b = rows of ONE microbatch slice (aggregate.py / trainer.step)
+    eps / eps_hi = lower / upper clip deltas from 1  (ratio window [1-eps, 1+eps_hi];
+    config fields eps_clip / eps_clip_high).  Full glossary: root README.md § Notation.
 
 Companion to:
   - notes/ppo_to_grpo_derivation.md   (THE derivation: baseline unbiasedness,
@@ -55,7 +59,8 @@ CISPO later removes; see cispo.py).
 --------------------------------------------------------------------------------
  Dimension legend  (vs rl_notes files)
 --------------------------------------------------------------------------------
-  B = N = P*G completions;  T = padded length (prompt + completion);
+  B = N = P*G completions (N is rl_notes' name for B);  T = padded length
+  (prompt + completion; rl_notes calls it L);
   loss_mask (B, T) == rl_notes' action_mask, with ONE alignment difference:
   rl_notes tensors live on the (L-1) PREDICTION axis; here everything is
   position-aligned — gather_logprobs left-pads by one so logprobs[:, t] scores
@@ -189,7 +194,7 @@ def grpo_loss(policy_logprobs: Tensor, batch: Batch, cfg: GRPOConfig) -> tuple[T
         # d clamped for numerical safety on rare tokens (e^20 overflows the
         # loss long before the estimate is meaningful).
         d = (batch.ref_logprobs - policy_logprobs).clamp(-20.0, 20.0)  # (B, T) grad via policy
-        kl = d.exp() - d - 1  # (B, T)  (e^d - 1) - d  >= 0
+        kl = d.exp() - d - 1  # (B, T)  e^d - d - 1  >= 0
         loss_map = loss_map + cfg.kl_loss_coef * kl  # (B, T)
         metrics["kl_ref"] = masked_mean(kl.detach(), mask)  # scalar
 

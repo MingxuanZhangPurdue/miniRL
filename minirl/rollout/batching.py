@@ -47,6 +47,8 @@ def make_batch(
     (frac_degenerate_groups is the key GRPO signal — docs/sync_training.md §4).
     """
     b = len(trajs)
+    # = this batch's T (padded prompt+completion length); NOT the engine's
+    # T_max, which is the padded PROMPT length of a generation batch
     t_max = max(t.input_ids.numel() for t in trajs)
 
     input_ids = torch.full((b, t_max), pad_id, dtype=torch.long)  # (B, T)

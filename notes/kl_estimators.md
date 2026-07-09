@@ -3,6 +3,11 @@
 Why the "KL" in GRPO/PPO code is a funny expression like `(r−1) − log r` instead of
 `Σ p log(p/q)` — and a proof that the k3 estimator is unbiased.
 
+> **Symbol caution (repo mapping):** in this note $r = p/q = \pi_{ref}/\pi$ — the KL
+> likelihood ratio, NOT the policy update ratio $r_t = \pi_\theta/\pi_{old}$ of
+> `minirl/algos/`. In repo terms, $\log r$ here is the `d` fed to k3
+> (`d = log pi_ref - log pi_theta`, grpo.py). Full mapping: root README § Notation.
+
 Companion to: [`rl_loss.py`](rl_loss.py) (`approx_kl1/2/3`), [`grpo_loss_explained.py`](grpo_loss_explained.py),
 [`ppo_loss_explained.py`](ppo_loss_explained.py). Source idea: http://joschu.net/blog/kl-approx.html
 

@@ -320,7 +320,8 @@ agentic-RL implementations go wrong.
 Each algorithm = one loss file + one recipe + one doc note. Ordered as a study path:
 
 1. **SFT** — masked NLL. Teaches: chat templates, loss masking, packing.
-2. **DPO** — `-log σ(β(Δlogπ_policy − Δlogπ_ref))` on chosen/rejected pairs.
+2. **DPO** — `-log σ(β[log(π_θ(y_c)/π_ref(y_c)) − log(π_θ(y_r)/π_ref(y_r))])`
+   on chosen/rejected pairs (y_c, y_r) — notes/dpo_derivation.md eq. (S9).
    Teaches: reference models, implicit reward, why sequence logprobs need
    length awareness. Variants behind flags: IPO, label smoothing (cDPO).
 3. **REINFORCE / RLOO** — simplest policy gradient with leave-one-out baseline.
@@ -462,9 +463,11 @@ Built in two tiers, mirroring slime (full study + design: docs/async_training.md
   Workers pick up new weights between episodes — mid-episode weight switching
   is off by default but available as a config flag, since it's a real
   design axis in GLM-5's async agentic RL.
-- **Off-policy correction**: in the loss, ratio = `exp(π_now − π_behavior)`
-  truncated at `c̄` (TIS), plus PPO clipping. Ablation configs let you show
-  *why* this is needed (train with/without and watch it diverge).
+- **Off-policy correction**: the same two-gap decomposition as tier-1 async —
+  TIS weight `w_t = clamp(exp(logπ_old − logπ_engine), lo, hi)` on the pg
+  term, plus PPO clipping of `r_t = exp(logπ_θ − logπ_old)` (the two-gap
+  picture in `algos/tis.py`). Ablation configs let you show *why* this is
+  needed (train with/without and watch it diverge).
 
 The sync controller is a degenerate case of the async one (1 worker,
 `max_version_lag = 0`) — but we keep both files because the sync one should be

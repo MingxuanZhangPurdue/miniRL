@@ -4,6 +4,11 @@ A self-contained derivation. The thread: start from "maximize trajectory reward,
 reduce variance step by step until the **advantage** appears, fix off-policy reuse to get
 **PPO's clipped objective**, and see why estimating the advantage *is* **GAE**.
 
+> **Symbol caution (repo mapping):** $G_t$ here is the return (reward-to-go), NOT the
+> group size $G$ of `minirl/algos/` — in the repo's bandit setting (one terminal reward)
+> $G_t$ collapses to $R_i$. And $r(\theta)$ here is the repo's token ratio $r_t$.
+> Full mapping: root README § Notation.
+
 ---
 
 ## 0. Setup and notation

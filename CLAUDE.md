@@ -11,7 +11,9 @@ principles, architecture, file tree with [done] marks, and a Status section
 saying exactly what is built and what comes next. Docs-before-code repo:
 every subsystem has a design note in `docs/` (sync/async training, precision,
 packing, agentic RL); math derivations live in `notes/`; the algorithm
-formula/config reference is `minirl/algos/README.md`.
+formula/config reference is `minirl/algos/README.md`; the repo-wide notation
+glossary (symbols, shapes, the four policies, notes/ symbol mapping) is
+`README.md` § Notation — new comments and docs MUST use those symbols.
 
 ## Environment & commands
 

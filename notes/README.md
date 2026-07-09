@@ -33,4 +33,6 @@ now covers every implemented loss):
 
 The formula/notation quick-reference for the implemented zoo is
 `minirl/algos/README.md`; each loss file's banner carries its own derivation
-summary and slime grounding.
+summary and slime grounding. These notes keep some LOCAL symbols that collide
+with the repo's ($G_t$ = return, kl_estimators' $r = \pi_{ref}/\pi$) — the
+mapping table lives in the root [README.md § Notation](../README.md#notation).

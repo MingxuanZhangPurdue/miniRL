@@ -107,6 +107,10 @@ def gspo_loss(policy_logprobs: Tensor, batch: Batch, cfg: GSPOConfig) -> tuple[T
     metrics = {
         # every token of a clipped row counts, so this ~= fraction of clipped SEQUENCES
         "clip_frac": masked_mean((clipped * adv < ratio * adv).float(), mask),  # scalar
+        # mixed granularity on purpose: per token this is (s_i - 1 - log r_t),
+        # but summed over a row it telescopes (sum_t log r_t = |y_i| log s_i)
+        # into |y_i| * k3(s_i) — so the masked mean is the token-count-weighted
+        # mean of per-SEQUENCE k3 drift
         "approx_kl": masked_mean(ratio.detach() - 1 - log_ratio.detach(), mask),  # scalar
         "ratio_max": ratio.detach().max(),  # scalar
     }

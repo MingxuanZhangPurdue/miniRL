@@ -17,7 +17,7 @@ Companion to:
 
 THE ONE IDEA:
   PPO/GRPO put the gradient THROUGH the ratio and then CLIP it — so when a
-  token's ratio leaves [1-eps_lo, 1+eps_hi], its gradient becomes ZERO (the
+  token's ratio leaves [1-eps, 1+eps_hi], its gradient becomes ZERO (the
   token is dropped from the update). CISPO never drops a token: it uses the
   clipped ratio as a DETACHED (stop-gradient) WEIGHT on a REINFORCE term, so
   EVERY token keeps a gradient; clipping only BOUNDS the weight (variance).

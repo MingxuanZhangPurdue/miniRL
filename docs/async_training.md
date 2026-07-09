@@ -118,9 +118,9 @@ In sync training, `old_logprobs = behavior_logprobs` was tolerable (same
 version; only numerics differ). Under async it is WRONG to conflate them —
 three distinct policies touch each batch:
 
-    pi_engine@v_{k-1}   sampled the tokens  -> behavior_logprobs (came with data)
-    pi_learner@v_k      starts this update  -> old_logprobs      (recompute, fp32)
-    pi_learner@v_k+     during ppo epochs   -> policy_logprobs   (the fwd pass)
+    pi_engine @v_{k-1}          sampled the tokens  -> behavior_logprobs (came with data)
+    pi_old    = learner@v_k     starts this update  -> old_logprobs      (recompute, fp32)
+    pi_theta  = learner@v_k+    during ppo epochs   -> policy_logprobs   (the fwd pass)
 
 The PPO/GRPO ratio must be policy/old (trust region around where THIS update
 started); TIS's weight exp(old - behavior) then absorbs the version gap AND

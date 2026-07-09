@@ -8,17 +8,19 @@ because the mismatch is a property of the INFRA, not the algorithm.
 THE TWO-GAP PICTURE — three copies of "the same" policy touch each batch:
 
   pi_engine@v_{k-1} --(gap 1: version lag + vLLM numerics)--> pi_old = learner@v_k --(gap 2: drift over ppo epochs)--> pi_theta
-         └──────────────── TIS (this file):  w_t = clamp(exp(old - behavior), lo, C) ────────────────┘└──── PPO clip (in the losses) ────┘
+         └─────────────── TIS (this file):  w_t = clamp(exp(old - behavior), lo, hi) ────────────────┘└──── PPO clip (in the losses) ────┘
 
 Rollout tokens were sampled from the inference engine's numerics (vLLM
 kernels, bf16 — DESIGN §6.0; we measured the gap), and under async training
 also from an older weight version. The unbiased fix is the per-token weight
 
-    w_t = pi_old_trainer(y_t) / pi_engine(y_t) = exp(logpi_old - logpi_rollout)
+    w_t = pi_old(y_t) / pi_engine(y_t) = exp(logpi_old - logpi_engine)
 
-TRUNCATED to [tis_clip_low, tis_clip]: truncation trades a little bias for a
-lot of variance — the standard TIS compromise
-(https://fengyao.notion.site/off-policy-rl).
+(log pi_engine on the realized tokens travels as Batch.behavior_logprobs —
+"behavior policy" in RL terms; slime names the same tensor
+rollout_log_probs.) TRUNCATED to [lo, hi] = [tis_clip_low, tis_clip]:
+truncation trades a little bias for a lot of variance — the standard TIS
+compromise (https://fengyao.notion.site/off-policy-rl).
 
 GROUNDED IN SLIME (megatron_utils/loss.py):
   - mode="clamp" == vanilla_tis_function:
@@ -42,10 +44,10 @@ from minirl.algos.aggregate import masked_mean
 def apply_tis(
     loss_map: Tensor,  # (B, T) per-token surrogate loss (pre-KL)
     old_logprobs: Tensor,  # (B, T) f32 FROZEN — trainer's pi_old recompute (engine values in the degenerate case)
-    rollout_logprobs: Tensor,  # (B, T) f32 FROZEN — what the engine reported at sampling time
+    behavior_logprobs: Tensor,  # (B, T) f32 FROZEN — log pi_engine at sampling time (slime: rollout_log_probs)
     mask: Tensor,  # (B, T) bool — completion-token positions
-    tis_clip: float = 2.0,  # upper cap C (slime --tis-clip default 2.0)
-    tis_clip_low: float = 0.0,  # lower bound (slime --tis-clip-low default 0)
+    tis_clip: float = 2.0,  # upper cap hi (slime --tis-clip default 2.0)
+    tis_clip_low: float = 0.0,  # lower bound lo (slime --tis-clip-low default 0)
     mode: str = "clamp",  # "clamp" (truncate) | "mask" (icepop: reject)
 ) -> tuple[Tensor, dict]:
     """Returns (reweighted loss_map (B, T), tis metrics dict).
@@ -54,7 +56,7 @@ def apply_tis(
     enable. detach() is belt-and-braces: both inputs are grad-free already, and
     the weight must stay a pure coefficient — never a gradient path.
     """
-    tis = (old_logprobs - rollout_logprobs).exp().detach()  # (B, T)  1 where no mismatch
+    tis = (old_logprobs - behavior_logprobs).exp().detach()  # (B, T)  1 where no mismatch
     if mode == "clamp":
         weight = tis.clamp(min=tis_clip_low, max=tis_clip)  # (B, T)  truncate the tails
     elif mode == "mask":

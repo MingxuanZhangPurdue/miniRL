@@ -17,28 +17,34 @@ dr_grpo) — the diff between two entries below IS the diff between the papers.
 
 ## Notation
 
+Full repo-wide glossary (incl. shape symbols and the notes/ mapping): root
+[README.md § Notation](../../README.md#notation). The working set for this file:
+
 ```
-pi_theta   current policy — the ONLY gradient path          B = P*G completions
-pi_old     policy at update start (frozen fp32 recompute)   G = group size (completions/prompt)
-pi_engine  rollout engine's policy (sampled the tokens)     T = padded prompt+completion length
-pi_ref     frozen reference model                           y_t = sampled token at position t
-sg(.)      stop-gradient == .detach()                       eps / eps_hi = clip deltas from 1
+pi_theta   current policy — the ONLY gradient path          B = P*G completions in a batch
+pi_old     policy at update start (frozen fp32 recompute)   P = prompts (= groups)
+pi_engine  rollout engine's policy (sampled the tokens)     G = group size (completions/prompt)
+pi_ref     frozen reference model                           T = padded prompt+completion length
+sg(.)      stop-gradient == .detach()                       y_t = sampled token at position t
+                                                            eps / eps_hi = clip deltas from 1
 
 r_t  = exp( log pi_theta(y_t|y_<t) - log pi_old(y_t|y_<t) )          token IS ratio
 s_i  = exp( (1/|y_i|) * sum_t log r_t )                              sequence (geometric-mean) ratio
-A_i  = (R_i - mean_group) / (std_group + eps)                        group advantage, one scalar per
-                                                                     completion, broadcast to its tokens
-w_t  = clamp( exp(log pi_old - log pi_engine), lo, C )               TIS weight (engine-mismatch +
-                                                                     staleness correction)
+A_i  = (R_i - mean_group) / (std_group + eps_std)                    group advantage, one scalar per
+       (eps_std ~ 1e-6, numerical only — NOT the clip eps)           completion, broadcast to its tokens
+w_t  = clamp( exp(log pi_old - log pi_engine), lo, hi )              TIS weight (engine-mismatch +
+       ((lo, hi) = (tis_clip_low, tis_clip) = (0.0, 2.0))            staleness correction)
 k3   = e^d - d - 1,  d = log pi_ref - log pi_theta                   unbiased KL(pi||pi_ref) estimator
 ```
+
+(`C` is reserved for Dr. GRPO's constant denominator — the reduce table below.)
 
 ## Implemented algorithms
 
 | algorithm | `make_loss` | lives in | loss (per token t of completion i) | reduce |
 |---|---|---|---|---|
 | **GRPO** (arXiv:2402.03300) | `"grpo"` | grpo.py | `L_t = -min( r_t·A_i , clip(r_t, 1-eps, 1+eps_hi)·A_i )` `[+ beta·k3]` | `"seq_mean"` |
-| **GSPO** (arXiv:2507.18071) | `"gspo"` | gspo.py | same surrogate with `s_i` in place of `r_t` (one ratio per SEQUENCE); eps ~1e-4 | `"seq_mean"` |
+| **GSPO** (arXiv:2507.18071) | `"gspo"` | gspo.py | same surrogate with `s_i` in place of `r_t` (one ratio per SEQUENCE); eps ~3e-4 | `"seq_mean"` |
 | **CISPO** (arXiv:2506.13585) | `"cispo"` | cispo.py | `L_t = -sg( clip(r_t, -inf, 1+eps_hi) ) · A_i · log pi_theta(y_t)` — clipped tokens KEEP gradient | `"token_mean"` |
 | **SFT** | `"sft"` | sft.py | `L_t = -log pi_theta(y_t)` on assistant tokens | `"token_mean"` |
 | **DAPO** (arXiv:2503.14476) | `"dapo"` | **config of GRPO** | GRPO with `eps_clip_high=0.28` (clip-higher), no KL (default) | `"token_mean"` |
