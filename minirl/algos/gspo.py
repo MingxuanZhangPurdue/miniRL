@@ -9,7 +9,7 @@ LOSS (notation: see grpo.py; new symbol s_i = SEQUENCE-level ratio):
          = GEOMETRIC MEAN of the token ratios r_t — one per completion
     L_t  = -min( s_i * A_i ,  clip(s_i, 1-eps, 1+eps_hi) * A_i )      same value for
            [ * w_t ]  TIS, if use_tis                                 EVERY t of completion i
-    L    = per-SEQUENCE mean of L_t     (calculate_per_token_loss=False)
+    L    = per-SEQUENCE mean of L_t     (loss_agg="seq_mean")
 
 Companion to:
   - rl_notes: gspo_loss_explained.py  (the annotated version of exactly this)
@@ -65,7 +65,7 @@ class GSPOConfig:
     eps_clip: float = 3e-4  # sequence ratios hug 1 -> tiny clips (paper order of magnitude)
     eps_clip_high: float = 4e-4
     grpo_std_normalization: bool = True  # STEP 2 unchanged: advantages still group-normalized
-    calculate_per_token_loss: bool = False  # sequence-level algorithm -> per-sequence mean reduce
+    loss_agg: str | int = "seq_mean"  # sequence-level algorithm -> per-sequence mean reduce
     use_tis: bool = False
     tis_clip: float = 2.0
     tis_clip_low: float = 0.0

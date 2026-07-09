@@ -96,6 +96,18 @@ def test_make_batch_round_trip_and_advantages():
     assert stats["frac_degenerate_groups"] == 0.0 and stats["response_tokens"] == 3 + 4 + 5 + 6
 
 
+def test_make_batch_advantage_fn_is_pluggable():
+    trajs = make_trajs()
+    # custom estimator: identity (advantage = raw reward, no baseline)
+    batch, _ = make_batch(trajs, pad_id=0, advantage_fn=lambda r, g: r)
+    row_adv = batch.advantages.sum(-1) / batch.loss_mask.sum(-1)  # (B,) recovered scalars
+    assert torch.allclose(row_adv, batch.rewards)
+    # None: zeros filled, never computed (SFT / PPO-fills-later path)
+    batch, stats = make_batch(trajs, pad_id=0, advantage_fn=None)
+    assert (batch.advantages == 0).all()
+    assert "frac_degenerate_groups" in stats  # stats still computed from rewards
+
+
 def test_minibatch_iteration_covers_batch_deterministically():
     batch, _ = make_batch(make_trajs(), pad_id=0)
     g1, g2 = torch.Generator().manual_seed(7), torch.Generator().manual_seed(7)
@@ -130,6 +142,17 @@ def test_microbatch_split_does_not_change_the_update():
         results.append([p.detach().clone() for p in trainer.model.parameters()])
     for p8, p1 in zip(*results):
         assert torch.allclose(p8, p1, atol=1e-6)
+
+
+def test_constant_normalizer_dr_grpo_reduce():
+    """Dr. GRPO's exact reduce: denom = rows * constant, not the actual token count.
+    Same per-token values => losses relate by exactly (actual_tokens / (B * C))."""
+    batch, _ = make_batch(make_trajs(), pad_id=0)
+    actual_tokens = int(batch.loss_mask.sum())  # 3+4+5+6 = 18
+    C = 10
+    loss_actual = new_trainer(grpo_loss, GRPOConfig(loss_agg="token_mean")).step(batch)["loss"]
+    loss_const = new_trainer(grpo_loss, GRPOConfig(loss_agg=C)).step(batch)["loss"]
+    assert loss_const * (4 * C) == pytest.approx(loss_actual * actual_tokens, rel=1e-5)
 
 
 def test_first_step_is_on_policy():

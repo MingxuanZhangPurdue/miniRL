@@ -10,13 +10,11 @@ import torch
 
 from minirl.algos import (
     CISPOConfig,
-    DAPOConfig,
     GRPOConfig,
     GSPOConfig,
     SFTConfig,
     aggregate_loss,
     cispo_loss,
-    dapo_loss,
     degenerate_group_mask,
     grpo_advantages,
     grpo_loss,
@@ -128,17 +126,23 @@ def test_tis_rescales_surrogate_but_not_kl():
 # ---------------- DAPO ----------------
 
 
-def test_dapo_clip_higher_admits_more_upside():
+def test_dapo_is_a_named_grpo_config():
+    """DAPO = GRPO's loss body + {eps_clip_high: 0.28, loss_agg: token_mean}."""
+    dapo_fn, dapo_cfg = make_loss("dapo")
+    assert dapo_fn is grpo_loss  # file-vs-config rule: identical body
+    assert dapo_cfg.eps_clip_high == 0.28 and dapo_cfg.loss_agg == "token_mean"
+    assert dapo_cfg.use_kl_loss is False  # change #2 is GRPO's default anyway
+
     lp = torch.tensor([[math.log(1.25)]])
     grpo_out, _ = grpo_loss(lp, make_batch(lp), GRPOConfig())  # hi = 0.2 -> clipped at 1.2
-    dapo_out, m = dapo_loss(lp, make_batch(lp), DAPOConfig())  # hi = 0.28 -> 1.25 admitted
+    dapo_out, m = dapo_fn(lp, make_batch(lp), dapo_cfg)  # hi = 0.28 -> 1.25 admitted
     assert torch.allclose(grpo_out, torch.tensor([[-1.2]]), atol=1e-6)
     assert torch.allclose(dapo_out, torch.tensor([[-1.25]]), atol=1e-6)
     assert m["clip_frac"].item() == 0.0
     # the lower clip binds only for A<0 (min picks the pessimistic branch):
     # ratio 0.5, A=-1 -> min(-0.5, clip(0.5)->0.8 * -1) = -0.8 -> loss 0.8
     lp_dn = torch.tensor([[math.log(0.5)]])
-    dn, _ = dapo_loss(lp_dn, make_batch(lp_dn, adv=-torch.ones(1, 1)), DAPOConfig())
+    dn, _ = dapo_fn(lp_dn, make_batch(lp_dn, adv=-torch.ones(1, 1)), dapo_cfg)
     assert torch.allclose(dn, torch.tensor([[0.8]]), atol=1e-6)
 
 
@@ -192,8 +196,8 @@ def test_sft_and_aggregation_modes():
     mask = torch.tensor([[True, True, False, False], [True, True, True, True]])
     loss_map, m = sft_loss(lp, make_batch(lp, mask=mask), SFTConfig())
     # token: (2*1 + 4*2) / 6 ; sequence: (1 + 2) / 2
-    assert aggregate_loss(loss_map, mask, "token").item() == pytest.approx(10 / 6)
-    assert aggregate_loss(loss_map, mask, "sequence").item() == pytest.approx(1.5)
+    assert aggregate_loss(loss_map, mask, "token_mean").item() == pytest.approx(10 / 6)
+    assert aggregate_loss(loss_map, mask, "seq_mean").item() == pytest.approx(1.5)
     assert m["nll"].item() == pytest.approx(10 / 6)
 
 
@@ -202,15 +206,21 @@ def test_token_aggregation_microbatch_invariance():
     torch.manual_seed(0)
     loss_map = torch.rand(4, 6)
     mask = torch.rand(4, 6) > 0.4
-    full = aggregate_loss(loss_map, mask, "token")
+    full = aggregate_loss(loss_map, mask, "token_mean")
     denom = mask.sum()
-    split = sum(aggregate_loss(loss_map[i : i + 2], mask[i : i + 2], "token", denom=denom) for i in (0, 2))
+    split = sum(aggregate_loss(loss_map[i : i + 2], mask[i : i + 2], "token_mean", denom=denom) for i in (0, 2))
     assert full.item() == pytest.approx(split.item(), rel=1e-6)
 
 
 def test_make_loss_wrapper():
     loss_fn, cfg = make_loss("dapo", eps_clip_high=0.3)
-    assert loss_fn is dapo_loss and cfg.eps_clip_high == 0.3
+    assert loss_fn is grpo_loss and cfg.eps_clip_high == 0.3  # override beats the preset
+    # dr_grpo: named variant = grpo loss body + the two bias-removal flags
+    loss_fn, cfg = make_loss("dr_grpo")
+    assert loss_fn is grpo_loss
+    assert cfg.grpo_std_normalization is False and cfg.loss_agg == "token_mean"
+    _, cfg = make_loss("dr_grpo", use_tis=True, grpo_std_normalization=True)  # overrides still win
+    assert cfg.use_tis is True and cfg.grpo_std_normalization is True
     lp = torch.zeros(1, 2)
     loss_map, metrics = loss_fn(lp, make_batch(lp), cfg)
     assert loss_map.shape == (1, 2) and "clip_frac" in metrics

@@ -56,7 +56,7 @@ either; we store the two forms the consumers actually index with.)
 ### batching.py — `pack_batch` (~60 lines, the main new code)
 
 ```python
-def pack_batch(trajs, max_tokens, norm_std=True) -> tuple[list[Batch], dict]:
+def pack_batch(trajs, max_tokens, advantage_fn=grpo_advantages) -> tuple[list[Batch], dict]:
     # 1. advantages per trajectory (identical math to make_batch)
     # 2. greedy fill: walk the (shuffled) trajectories, start a new pack when
     #    adding the next one would exceed max_tokens. (FFD sort-by-length would

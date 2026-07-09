@@ -1,9 +1,9 @@
 """SFT data over HF conversation datasets.
 
 An SFT example IS a Trajectory with zero behavior logprobs and zero reward, so
-it flows through the SAME make_batch as RL — advantages come out zero and are
-ignored by the SFT loss. The only SFT-specific work is the assistant-only
-loss mask (data/chat.py) and shuffled batching here.
+it flows through the SAME make_batch as RL — with advantage_fn=None (SFT has
+no advantages; zeros are filled and never read). The only SFT-specific work is
+the assistant-only loss mask (data/chat.py) and shuffled batching here.
 """
 
 import random
@@ -54,7 +54,7 @@ def sft_batches(
             )
         )
         if len(trajs) == batch_size:
-            yield make_batch(trajs, pad_id=tokenizer.pad_token_id or 0)[0]
+            yield make_batch(trajs, pad_id=tokenizer.pad_token_id or 0, advantage_fn=None)[0]
             trajs = []
     if trajs:  # final short batch
-        yield make_batch(trajs, pad_id=tokenizer.pad_token_id or 0)[0]
+        yield make_batch(trajs, pad_id=tokenizer.pad_token_id or 0, advantage_fn=None)[0]

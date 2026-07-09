@@ -6,18 +6,42 @@ constraint) vs the engine's LEFT-padding (prompts must touch the first
 generated token) — the classic pair of conventions worth one comment each.
 """
 
+from typing import Callable
+
 import torch
 from torch import Tensor
 
 from minirl.algos.advantage import degenerate_group_mask, grpo_advantages
 from minirl.rollout.types import Batch, Trajectory
 
+# Per-ROW advantage estimator: (rewards (B,), group_ids (B,)) -> (B,) scalars,
+# broadcast onto response tokens by make_batch. ≈ slime's advantage_estimator
+# dispatch, as a plain callable (DESIGN principle 8 corollary: no path plugins).
+#
+# SCOPE, deliberately: this signature covers the critic-free SCALAR family
+# (GRPO/Dr.GRPO, RLOO, global-batch baselines, rank-in-group, ...). PER-TOKEN
+# estimators (GAE, REINFORCE++ returns, OPD KL-shaping) need tensors that only
+# exist post-collation/post-forward — those overwrite batch.advantages AFTER
+# make_batch instead; no signature could pull them earlier. Two tiers, both open.
+AdvantageFn = Callable[[Tensor, Tensor], Tensor]
 
-def make_batch(trajs: list[Trajectory], pad_id: int, norm_std: bool = True) -> tuple[Batch, dict]:
-    """Collate B trajectories into one right-padded Batch with GRPO advantages.
+
+def make_batch(
+    trajs: list[Trajectory],
+    pad_id: int,
+    advantage_fn: AdvantageFn | None = grpo_advantages,
+) -> tuple[Batch, dict]:
+    """Collate B trajectories into one right-padded Batch (+ advantages).
+
+    advantage_fn picks the estimator (default: GRPO group-relative; pass
+    functools.partial(grpo_advantages, norm_std=False) for Dr. GRPO).
+    advantage_fn=None fills ZEROS — for consumers that don't use advantages
+    (SFT) or that must fill them AFTER collation (PPO/GAE needs critic values
+    over the collated batch, so its recipe overwrites batch.advantages).
+    DPO never comes through here (paired collation, data/preference.py).
 
     Expects traj.meta["group_id"] (set by rollout/sampling.collect_groups);
-    rows without one become singleton groups (advantage 0 — harmless for SFT).
+    rows without one become singleton groups (advantage 0 under GRPO).
 
     Returns (batch, stats) where stats carries collation health metrics
     (frac_degenerate_groups is the key GRPO signal — docs/sync_training.md §4).
@@ -42,7 +66,7 @@ def make_batch(trajs: list[Trajectory], pad_id: int, norm_std: bool = True) -> t
         behavior_logprobs[i, :n] = tr.logprobs  # already 0 where loss_mask False
 
     # Per-row scalar advantage, broadcast onto response tokens only.
-    adv_row = grpo_advantages(rewards, group_ids, norm_std=norm_std)  # (B,)
+    adv_row = advantage_fn(rewards, group_ids) if advantage_fn is not None else torch.zeros_like(rewards)  # (B,)
     advantages = adv_row.unsqueeze(-1) * loss_mask  # (B, T)
 
     stats = {

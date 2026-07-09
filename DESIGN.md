@@ -91,6 +91,12 @@ Reference codebases and study resources:
    general function). Applied so far: engines and envs are duck-typed with the
    contract in a docstring; each RL algorithm is its own file rather than
    flags on a shared one. Readability outranks flexibility everywhere.
+   Corollary — **no string-path plugins, ever**: slime's `--custom-*-path`
+   hooks (rollout fn, rm, advantage, TIS, loss) exist because its users
+   configure a packaged CLI from shell scripts; miniRL's users write Python
+   recipes against a library they own, so every such hook maps to a plain
+   callable argument (e.g. collect_groups' reward_fn / group_filter). Same
+   extensibility, no load_function machinery, type-checked.
 9. **Concept-compatible with production frameworks.** Component boundaries,
    names, and dataflow deliberately mirror slime and verl, so that after
    miniRL you can open those codebases with zero new mental model — only new
@@ -119,7 +125,8 @@ miniRL/
 │   │   ├── hf.py                # load_policy()/load_ref(): AutoModelForCausalLM +
 │   │   │                        #   dtype, attn impl, grad ckpt, use_cache=False;
 │   │   │                        #   save_checkpoint() always in HF format
-│   │   └── value_head.py        # scalar head wrapping the HF model (critic / RM)
+│   │   └── value_head.py        # scalar head wrapping the HF model (reward model only —
+│   │                            #   no critic: PPO is out of scope, see non-goals)
 │   │
 │   ├── engine/                  # rollout backends, pluggable (≈ verl's rollout worker)
 │   │   │                        # engines are duck-typed: generate(prompts, params)
@@ -157,15 +164,17 @@ miniRL/
 │   │   │                        #   (slime CLI names) live next to their loss.
 │   │   ├── sft.py               # [done] masked NLL
 │   │   ├── grpo.py              # [done] PPO-clip surrogate + optional KL-to-ref
-│   │   ├── dapo.py              # [done] clip-higher, no KL, token-level agg
+│   │   │                        # DAPO + Dr. GRPO: NAMED CONFIGS of grpo.py in the
+│   │   │                        #   LOSSES registry (their loss bodies == GRPO's);
+│   │   │                        #   formula table + config reference: algos/README.md
 │   │   ├── gspo.py              # [done] sequence-level (geometric-mean) ratio
 │   │   ├── cispo.py             # [done] stop-grad clipped IS weight (grad thru clips)
 │   │   ├── tis.py               # [done] shared: truncated importance sampling (clamp/icepop)
 │   │   ├── aggregate.py         # [done] shared: token- vs sequence-level reduction, ONCE
 │   │   ├── advantage.py         # [done] shared: GRPO group norm (Dr.GRPO flag), degenerate mask
 │   │   ├── dpo.py               # DPO (needs ref_logprobs in Batch)
-│   │   ├── ppo.py               # PPO with critic + GAE (the "full" baseline)
-│   │   ├── reinforce.py         # REINFORCE / RLOO (leave-one-out baseline)
+│   │   ├── reinforce.py         # REINFORCE / RLOO (leave-one-out baseline; fits the
+│   │   │                        #   scalar AdvantageFn tier — batching.py)
 │   │   └── distill.py           # on-policy distillation: reverse-KL to teacher (MOPD-lite)
 │   │
 │   ├── train/
@@ -234,9 +243,13 @@ miniRL/
 │   └── ...
 │
 ├── tests/                       # correctness tests (see §8)
-└── docs/                        # one short note per topic. Exist: sync_training.md,
-                                 #   async_training.md, precision.md, agentic_rl.md,
-                                 #   packing.md; algo math notes + production_gap.md to come
+├── docs/                        # one short note per topic. Exist: sync_training.md,
+│                                #   async_training.md, precision.md, agentic_rl.md,
+│                                #   packing.md; production_gap.md to come
+└── notes/                       # THEORY derivations, imported from the author's
+                                 #   rl_notes vault (derivations only — the vault's
+                                 #   annotated loss implementations ARE minirl/algos/):
+                                 #   pg→PPO, KL estimators (k3 proof), PPO→CISPO, DPO
 ```
 
 ## 4. Core data contract
@@ -283,13 +296,19 @@ Each algorithm = one loss file + one recipe + one doc note. Ordered as a study p
    Teaches: score function estimator, variance reduction, before any clipping.
 4. **GRPO family** [implemented] — the workhorse (RLVR à la Olmo 3 /
    DeepSeek-R1): sample G completions per prompt, advantage = group-normalized
-   reward, PPO-clip surrogate, optional KL-to-ref penalty. Each published
-   variant is its OWN file, readable against its paper and grounded against
-   slime: grpo.py, dapo.py (clip-higher + token-level agg + dynamic sampling
-   in rollout/sampling.py), gspo.py (sequence-level ratio), cispo.py
-   (stop-gradient clipped IS weight). Cross-cutting knobs stay per-file
-   configs: KL on/off, std-normalization (Dr. GRPO), TIS, aggregation level.
-5. **PPO with critic** — value head, GAE. Teaches: what GRPO removed and why.
+   reward, PPO-clip surrogate, optional KL-to-ref penalty. FILE-VS-CONFIG
+   RULE: a variant gets its own file only when its loss BODY differs —
+   grpo.py, gspo.py (sequence-level ratio), cispo.py (stop-gradient clipped
+   IS weight); variants reachable through GRPO's fields are NAMED CONFIGS in
+   the LOSSES registry — DAPO (clip-higher + token reduce; dynamic sampling
+   via rollout/sampling.py) and Dr. GRPO (no ÷std + constant reduce).
+   Formula table, notation, and the full config reference: algos/README.md.
+5. **PPO with critic** — [decided 2026-07: NOT implemented] — value-function
+   training + GAE is a whole second training loop for an algorithm the RLVR
+   field has moved past; we study it by CONTRAST instead (rl_notes
+   ppo_loss_explained.py; every grpo.py docstring names what PPO would add).
+   The per-token advantage path stays open architecturally (overwrite
+   batch.advantages post-collation — batching.py's tier-2 contract).
 6. **On-policy distillation (MOPD-lite)** — student samples, teacher scores
    every token; loss = reverse KL to teacher on student's own distribution.
    Teaches: dense rewards, distillation-as-RL (MiMo-V2-Flash's insight).
@@ -546,7 +565,7 @@ so the jump to slime/verl is documented, not just implied.
 | 1 | SFT | Loss curve sane; eval win on a held-out instruct set |
 | 2 | DPO | Implicit-reward margins increase; beats SFT on preference eval |
 | 3 | Sync GRPO on GSM8K (RLVR), vLLM rollouts | GSM8K accuracy climbs meaningfully from SFT baseline |
-| 4 | PPO + RLOO + ablation configs | Reproduce known qualitative results (e.g. clip-higher → longer stable runs); logprob-mismatch/TIS ablation (§6.0) |
+| 4 | RLOO + ablation configs | Reproduce known qualitative results (e.g. clip-higher → longer stable runs); logprob-mismatch/TIS ablation (§6.0) |
 | 5 | Async infra | Disaggregated async GRPO on N GPUs matches sync final reward with higher throughput; staleness ablation; colocated-vs-disaggregated throughput comparison |
 | 5.5 | Sequence packing (CUDA) | SFT first, then RL: packed loss == padded loss on the same data (equivalence test); tokens/sec gain ≈ measured `frac_padding`; seam-position test |
 | 6 | Agentic RL | Tool-use task trained end-to-end, multi-turn masking verified |
@@ -560,6 +579,10 @@ so the jump to slime/verl is documented, not just implied.
 - No optimizer choices — AdamW (fp32 states), full stop. Every serious
   post-training recipe uses it; swapping optimizers is not this repo's
   curriculum.
+- No PPO / critic training — value-function learning + GAE is a second
+  training loop for an algorithm modern RLVR has moved past; the GRPO family
+  + RLOO cover the curriculum. GAE-style per-token advantages remain
+  architecturally possible (tier-2 batch.advantages overwrite) but unplanned.
 - No multi-language code judging — Python datasets only (which is where open
   RLVR research lives at this scale). C++/competitive-programming judging
   (compile + stdin/stdout diff) and repo-test-suite rewards are documented

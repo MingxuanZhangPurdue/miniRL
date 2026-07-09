@@ -8,8 +8,8 @@ LOSS (what this file computes, per completion token t of completion i):
     L_t  = -min( r_t * A_i ,  clip(r_t, 1-eps, 1+eps_hi) * A_i )      clipped surrogate
            [ * w_t ]                                                  TIS weight, if use_tis
            [ + beta * (e^d - d - 1) ],  d = log pi_ref - log pi_theta k3 KL, if use_kl_loss
-    L    = per-SEQUENCE mean of L_t     (calculate_per_token_loss=False; reduce
-                                         happens ONCE, in the trainer -> aggregate.py)
+    L    = per-SEQUENCE mean of L_t     (loss_agg="seq_mean"; the reduce happens
+                                         ONCE, in the trainer -> aggregate.py)
 
 NOTATION (the legend for ALL algos/ loss files; siblings list only their deltas):
 
@@ -26,8 +26,10 @@ Companion to:
   - rl_notes: grpo_loss_explained.py  (the annotated single-file pipeline this
     file productionizes — same clipped surrogate, same k3 KL, same group
     advantage; read that for the full STEP 0-3 walkthrough + PPO contrast)
-  - dapo.py / gspo.py / cispo.py      (each = THIS file with one change; see
+  - gspo.py / cispo.py                (each = THIS file with one change; see
     their "WHAT CHANGES vs GRPO" tables)
+  - DAPO / Dr. GRPO                   (NAMED CONFIGS of this file — loss bodies
+    are identical; see algos/README.md and the LOSSES registry)
   - docs/sync_training.md §5          (how the trainer calls this)
 
 THE ONE IDEA: **PPO without a value function.** Sample a GROUP of G completions
@@ -45,8 +47,8 @@ CISPO later removes; see cispo.py).
   STEP 1  bookkeeping: old/ref logprobs    trainer.compute_logprobs (fp32, frozen)
   STEP 2  group-relative advantage         algos/advantage.py (grpo_advantages)
   STEP 3  the loss (THIS FILE)             called per microbatch by trainer.step
-  reduce  per-SEQUENCE vs per-TOKEN        algos/aggregate.py — applied ONCE by
-                                           the trainer (calculate_per_token_loss)
+  reduce  seq_mean / token_mean / const    algos/aggregate.py — applied ONCE by
+                                           the trainer (cfg.loss_agg)
 
 --------------------------------------------------------------------------------
  Dimension legend  (vs rl_notes files)
@@ -96,7 +98,9 @@ class GRPOConfig:
     use_kl_loss: bool = False  # beta > 0 in the GRPO paper; modern RLVR recipes often drop it
     kl_loss_coef: float = 0.0  # slime --kl-loss-coef  (the paper's beta)
     grpo_std_normalization: bool = True  # False = Dr. GRPO; consumed by advantage.py (STEP 2)
-    calculate_per_token_loss: bool = False  # False: per-sequence mean (GRPO paper); consumed by trainer
+    loss_agg: str | int = "seq_mean"  # THE reduce (aggregate.py): "seq_mean" (GRPO paper),
+    #   "token_mean" (DAPO), or an int constant (Dr. GRPO exact — pass max_new_tokens).
+    #   One field = the whole GRPO/DAPO/Dr.GRPO normalization axis; trainer applies blindly.
     use_tis: bool = False  # truncated importance sampling (see tis.py)
     tis_clip: float = 2.0  # slime --tis-clip
     tis_clip_low: float = 0.0  # slime --tis-clip-low
@@ -152,7 +156,7 @@ def grpo_loss(policy_logprobs: Tensor, batch: Batch, cfg: GRPOConfig) -> tuple[T
         # fraction of completion tokens whose gradient the clip zeroed
         "clip_frac": masked_mean((clipped * adv < ratio * adv).float(), mask),  # scalar
         # k3 estimate of KL(pi_old || pi_theta) = E[r - 1 - log r] >= 0:
-        # the "how far did this minibatch drift" health metric (kl_estimators.md)
+        # the "how far did this minibatch drift" health metric (notes/kl_estimators.md)
         "approx_kl": masked_mean(ratio.detach() - 1 - log_ratio.detach(), mask),  # scalar
         "ratio_max": ratio.detach().max(),  # scalar — spikes signal mismatch/staleness bugs
     }
@@ -168,10 +172,16 @@ def grpo_loss(policy_logprobs: Tensor, batch: Batch, cfg: GRPOConfig) -> tuple[T
         metrics |= tis_metrics
 
     # ---- KL PENALTY — beta * k3(pi || pi_ref), added DIRECTLY to the loss ----
+    # Added PER-TOKEN into the map, so it inherits cfg.loss_agg automatically:
+    # the reduce is linear, reduce(pg + b*kl) == reduce(pg) + b*reduce(kl) for
+    # the same mode (slime reduces kl separately with the same reducer — same
+    # number, other algebraic form). Mixed modes (e.g. token-mean pg + seq-mean
+    # kl) would need the loss to return named maps for per-term reduces — no
+    # paper wants that; the seam exists but stays closed (principle 8).
     # (GRPO's placement; PPO instead folds KL into the reward before GAE — see
     # rl_notes ppo_loss_explained.py. Sign convention: d = log(pi_ref/pi_theta),
     # so k3 = e^d - d - 1 is the UNBIASED >= 0 estimator of KL(pi || pi_ref)
-    # under samples from pi — cf. rl_notes kl_estimators.md / approx_kl3.)
+    # under samples from pi — proof: notes/kl_estimators.md (cf. approx_kl3).)
     if cfg.use_kl_loss:
         assert batch.ref_logprobs is not None, "use_kl_loss requires batch.ref_logprobs"
         # d clamped for numerical safety on rare tokens (e^20 overflows the

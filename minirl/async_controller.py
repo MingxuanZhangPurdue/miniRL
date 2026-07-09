@@ -32,10 +32,12 @@ read from the loss config, off-policy trust region is the PPO clip.
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Callable
 
 from torch import Tensor
 
+from minirl.algos.advantage import grpo_advantages
 from minirl.config import CollectConfig
 from minirl.rollout.batching import make_batch
 from minirl.rollout.sampling import collect_groups
@@ -55,9 +57,12 @@ def fit_async(
     on_metrics: Callable[[dict], None] | None = None,  # e.g. print / wandb.log
 ) -> list[dict]:
     """Run tier-1 async RL. Returns the per-iteration metrics history."""
-    # Advantage std-normalization is an ALGORITHM property (Dr. GRPO flag),
-    # so the controller reads it from the loss config instead of owning it.
+    # The advantage estimator is an ALGORITHM property, so it derives from the
+    # loss config (Dr. GRPO = grpo_std_normalization=False). All current losses
+    # are group-relative; a future PPO recipe swaps the whole flow instead
+    # (critic values require the collated batch — see make_batch docstring).
     norm_std = getattr(trainer.loss_cfg, "grpo_std_normalization", True)
+    advantage_fn = partial(grpo_advantages, norm_std=norm_std)
 
     in_flight = threading.Event()  # instruments the tier-1 invariant (see publish)
 
@@ -100,7 +105,7 @@ def fit_async(
             staleness = (it - 1) - min(t.version for t in trajs)
             assert 0 <= staleness <= update_weights_interval, f"staleness {staleness} out of bounds"
 
-            batch, batch_stats = make_batch(trajs, pad_id=engine.pad_id, norm_std=norm_std)
+            batch, batch_stats = make_batch(trajs, pad_id=engine.pad_id, advantage_fn=advantage_fn)
             t0 = time.perf_counter()
             train_metrics = trainer.fit_batch(batch)  # recomputes old_logprobs (tier-1 rule)
             t_train = time.perf_counter() - t0

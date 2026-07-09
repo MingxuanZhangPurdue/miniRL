@@ -30,7 +30,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from minirl.algos.aggregate import aggregate_loss
+from minirl.algos.aggregate import aggregate_loss, minibatch_denom
 from minirl.rollout.batching import iter_microbatches, iter_minibatches
 from minirl.rollout.types import Batch
 
@@ -75,9 +75,10 @@ class Trainer:
         self.loss_cfg = loss_cfg
         self.cfg = cfg
         self.device = device
-        # Token-level vs per-sample-mean aggregation comes from the ALGO config
-        # (each paper prescribes its own), the trainer just applies it once.
-        self.agg_mode = "token" if getattr(loss_cfg, "calculate_per_token_loss", True) else "sequence"
+        # The reduce is an ALGORITHM property (each paper prescribes its own);
+        # the trainer applies whatever the config says, mechanically — all
+        # normalization knowledge lives in aggregate.py (loss_agg: str | int).
+        self.loss_agg = getattr(loss_cfg, "loss_agg", "token_mean")
         self.optimizer = torch.optim.AdamW(
             model.parameters(), lr=cfg.lr, betas=cfg.adam_betas, weight_decay=cfg.weight_decay
         )  # fp32 states regardless of model dtype (precision invariant)
@@ -110,10 +111,8 @@ class Trainer:
         every microbatch, so each loss contribution is sum/GLOBAL — splitting
         into microbatches cannot change the gradient (docs/sync_training.md §5).
         """
-        if self.agg_mode == "token":
-            denom = mb.loss_mask.sum().clamp(min=1).to(self.device)  # total response tokens
-        else:
-            denom = mb.input_ids.shape[0]  # total sequences
+        denom = minibatch_denom(self.loss_agg, mb.loss_mask)  # minibatch-GLOBAL, shared by all micros
+        denom = denom.to(self.device) if isinstance(denom, torch.Tensor) else denom
 
         micro_metrics: list[tuple[int, dict]] = []  # (token_count, metrics)
         total_loss = 0.0
@@ -122,7 +121,7 @@ class Trainer:
             logits = self.model(micro.input_ids, attention_mask=micro.attention_mask).logits  # (b, T, V)
             policy_logprobs = gather_logprobs(logits, micro.input_ids)  # (b, T) f32
             loss_map, metrics = self.loss_fn(policy_logprobs, micro, self.loss_cfg)  # (b, T)
-            loss = aggregate_loss(loss_map, micro.loss_mask, self.agg_mode, denom=denom)  # scalar
+            loss = aggregate_loss(loss_map, micro.loss_mask, self.loss_agg, denom=denom)  # scalar
             loss.backward()  # grads ACCUMULATE across microbatches
             total_loss += loss.item()
             micro_metrics.append((int(micro.loss_mask.sum()), {k: v.item() for k, v in metrics.items()}))

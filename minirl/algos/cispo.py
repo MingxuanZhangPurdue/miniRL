@@ -8,10 +8,11 @@ LOSS (notation: see grpo.py; note sg(.) = stop-gradient and the missing floor):
     L_t  = -sg( clip(r_t, -inf, 1+eps_hi) ) * A_i * log pi_theta(y_t | y_<t)
             └───── detached weight ─────┘         └── REINFORCE term ──┘
            [ * w_t ]  TIS, if use_tis  (a second detached coefficient)
-    L    = per-TOKEN mean of L_t       (calculate_per_token_loss=True)
+    L    = per-TOKEN mean of L_t       (loss_agg="token_mean")
 
 Companion to:
-  - rl_notes: cispo_loss_explained.py + ppo_to_cispo_derivation.md
+  - notes/ppo_to_cispo_derivation.md   (why the explicit log pi is needed)
+  - rl_notes: cispo_loss_explained.py  (the annotated version of exactly this)
   - grpo.py  (CISPO reuses STEP 0-2 unchanged; only this surrogate differs)
 
 THE ONE IDEA:
@@ -65,9 +66,11 @@ from minirl.rollout.types import Batch
 @dataclass(frozen=True)
 class CISPOConfig:
     eps_clip: float | None = None  # lower delta; None = unbounded below (canonical CISPO)
-    eps_clip_high: float = 0.28  # the upper cap delta — the knob that matters; tune per setup
+    eps_clip_high: float = 0.28  # the upper cap delta — the ONLY knob the paper tunes,
+    #   but it never publishes the value; 0.28 here is borrowed from DAPO's
+    #   clip-higher as a sane starting point, NOT a CISPO paper number. Tune.
     grpo_std_normalization: bool = True  # STEP 2 unchanged
-    calculate_per_token_loss: bool = True  # paper normalizes over tokens
+    loss_agg: str | int = "token_mean"  # paper normalizes over the group's total tokens
     use_tis: bool = False
     tis_clip: float = 2.0
     tis_clip_low: float = 0.0

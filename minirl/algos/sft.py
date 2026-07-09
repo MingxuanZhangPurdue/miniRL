@@ -5,7 +5,7 @@
 LOSS (notation: see grpo.py; no ratio, no advantage, no reference):
 
     L_t  = -log pi_theta(y_t | y_<t)      on loss_mask (assistant) tokens only
-    L    = per-TOKEN mean of L_t          (calculate_per_token_loss=True)
+    L    = per-TOKEN mean of L_t          (loss_agg="token_mean")
 
 THE ONE IDEA: maximize log-likelihood of curated completion tokens.
 policy_logprobs already IS log pi of the realized tokens (the trainer's
@@ -30,7 +30,7 @@ from minirl.rollout.types import Batch
 
 @dataclass(frozen=True)
 class SFTConfig:
-    calculate_per_token_loss: bool = True  # token-level: every demo token weighs equally
+    loss_agg: str | int = "token_mean"  # token-level: every demo token weighs equally
 
 
 def sft_loss(policy_logprobs: Tensor, batch: Batch, cfg: SFTConfig) -> tuple[Tensor, dict]:

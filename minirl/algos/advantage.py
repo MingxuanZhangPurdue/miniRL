@@ -77,7 +77,7 @@ def degenerate_group_mask(rewards: Tensor, group_ids: Tensor, atol: float = 1e-6
     """True for rows whose group has ~zero reward std => zero GRPO gradient.
 
     Same criterion as slime's `check_reward_nonzero_std` dynamic-sampling
-    filter and DAPO's dynamic sampling (change #4 in dapo.py). Used to filter
+    filter and DAPO's dynamic sampling (its one non-config change). Used to filter
     at collection time (rollout/sampling.py, the preferred fix) or to report
     `frac_degenerate_groups` — a key GRPO health metric (docs/sync_training.md §4).
     """
