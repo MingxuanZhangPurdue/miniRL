@@ -10,7 +10,8 @@ whose miniature architecture deliberately mirrors slime and verl.
 principles, architecture, file tree with [done] marks, and a Status section
 saying exactly what is built and what comes next. Docs-before-code repo:
 every subsystem has a design note in `docs/` (sync/async training, precision,
-packing, agentic RL); math derivations live in `notes/`; the algorithm
+packing, agentic RL, fast-RL throughput); math derivations live in `notes/`;
+the algorithm
 formula/config reference is `minirl/algos/README.md`; the repo-wide notation
 glossary (symbols, shapes, the four policies, notes/ symbol mapping) is
 `README.md` § Notation — new comments and docs MUST use those symbols.
@@ -23,6 +24,7 @@ glossary (symbols, shapes, the four policies, notes/ symbol mapping) is
 - Tests: `<that python> -m pytest tests/ -q` — keep it green; it is fast (~10s).
 - This machine is an Apple-silicon Mac: MPS + CPU only. vLLM/FSDP/packing are
   CUDA-path features — designed and documented, exercised on a GPU box later.
+  (Packing was prototyped and rolled back for readability — docs/packing.md.)
 - Smoke recipe: `recipes/03_grpo_gsm8k.py` (GRPO on GSM8K, runs on MPS in ~2 min).
 
 ## Conventions that are LAW here

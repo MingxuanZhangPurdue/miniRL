@@ -60,7 +60,9 @@ fresh weights, or with --partial-rollout resumed from where they stopped
 stale tokens' loss_mask). No eval mode; ordering best-effort. This is the
 GLM-5-style "learner never waits for the slowest episode" design — it matters
 for long/variable agentic episodes and is our Phase 6+ follow-up, not the
-basic trainer.
+basic trainer. Our concrete tier-2 plan (continuous batching, streaming
+collection, PipelineRL-style in-flight updates — keep-the-KV instead of
+slime's abort/requeue) lives in **docs/fast_rl.md**.
 
 ## 2. miniRL basic async = tier 1, one background future
 

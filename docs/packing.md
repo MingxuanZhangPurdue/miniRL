@@ -1,5 +1,12 @@
 # Sequence packing: implementation design
 
+Status: **NOT implemented — design only.** An implementation was prototyped
+and rolled back (2026-07-09): threading the packed layout through Batch /
+trainer / aggregate / gspo made the core files noticeably harder to read, and
+readability outranks a trainer-side speedup here. Whether and when to build
+it is an OPEN DECISION — revisit when GPU-scale runs report a `frac_padding`
+that hurts.
+
 Doc-before-code (repo convention; code must match this or the doc gets
 updated). Grounded in slime's `megatron_utils/data.py::get_batch` (THD packed
 rows + `cu_seqlens` + `PackedSeqParams`, pad-to-128, `--max-tokens-per-gpu`)
@@ -35,11 +42,15 @@ onto each segment's response tokens — packing is pure re-layout, zero math.
 **The attention rule (the one thing that must not be gotten wrong):** packing
 needs BLOCK-DIAGONAL attention — segment 1 must not see segment 0. A 2D
 attention mask cannot express that; naive `attention_mask=1` silently
-contaminates. Mechanism we use: **HF FlashAttention-2 infers the boundaries
-from the `position_ids` resets** (pass `position_ids`, pass NO 2D mask).
-Megatron/slime instead feed `cu_seqlens` to varlen kernels — same effect.
-Assert `attn_implementation == "flash_attention_2"` when packing: SDPA/eager
-do NOT do this inference and would train contaminated, silently.
+contaminates. Mechanism we would use: **HF FlashAttention-2 infers the
+boundaries from the `position_ids` resets** (pass `position_ids`, pass NO 2D
+mask). Megatron/slime instead feed `cu_seqlens` to varlen kernels — same
+effect. Assert `attn_implementation == "flash_attention_2"` when packing:
+SDPA/eager do NOT do this inference and would train contaminated, silently.
+(The prototype verified both halves empirically on a tiny random Qwen3: a 4D
+causal+same-segment mask reproduces each sequence's solo logprobs exactly,
+and the naive 2D mask measurably contaminates — the design is sound; it is
+the code-complexity trade that is deferred, not the correctness.)
 
 ## 3. What changes, file by file
 
@@ -113,10 +124,13 @@ seg_mean = seg_sum / seg_len.clamp(min=1)
   Branch on `batch.seg_ids is not None`; the padded path is untouched.
 - grpo/dapo/cispo/sft: fully elementwise — ZERO changes.
 
-### config — 2 fields
+### config — none (principle 8)
 
-`TrainConfig.pack: bool = False`, `TrainConfig.max_tokens: int = 8192`
-(only read when pack=True; replaces micro_batch_size in that mode).
+No `TrainConfig` fields: the trainer wouldn't pack, it would HANDLE packed
+input, so the decision lives at the collation call site — `pack_batch(trajs,
+max_tokens)` directly (RL recipes/controller), a `pack_max_tokens` param on
+`sft_batches` for SFT. `max_tokens` replaces `micro_batch_size` as the
+microbatch unit implicitly: packs ARE the micros.
 
 ### Untouched, and why
 
@@ -136,17 +150,20 @@ The exit criterion is the same invariance standard as microbatching and FSDP:
    tiny random Qwen3 — packed-with-mask vs padded must match logits within
    fp32 tolerance. This validates layout/position_ids/reduce logic on the Mac
    without FA2. (The 4D mask is O(T^2) memory — fine at test scale, exactly
-   why it is not the production mechanism.)
+   why it is not the production mechanism.) The rolled-back prototype PASSED
+   this rung, including the adversarial 2D-mask-contaminates check.
 2. **Segment-reduce unit tests** (pure CPU): seg-mean helper vs hand-computed;
    gspo packed-vs-padded on synthetic logprobs; aggregate sequence-mode
    packed-vs-padded equality.
-3. **Seam test**: boundary positions always loss-masked; a crafted trajectory
-   with response-final tokens near the seam shows no leakage into the loss.
-4. **GPU integration (later, on the box)**: FA2 packed forward vs padded
-   forward, same loss within bf16 tolerance; tokens/sec uplift ≈ measured
+3. **Seam test**: boundary positions always loss-masked.
+4. **Whole-trainer equivalence** on a position-invariant model: packed vs
+   padded fit_batch must yield identical parameters for all three loss_agg
+   modes.
+5. **GPU integration (on the box)**: FA2 packed forward vs padded forward,
+   same loss within bf16 tolerance; tokens/sec uplift ≈ measured
    `frac_padding`.
 
-## 5. Build order
+## 5. Build order (if/when the decision lands on "build it")
 
 SFT packing → RL token-mode packing (dapo/cispo — no reduce changes) →
 segment reduces (grpo sequence-mode, gspo) → GPU validation. Each rung has

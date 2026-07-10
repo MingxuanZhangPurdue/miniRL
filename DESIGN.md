@@ -17,7 +17,7 @@ async RL, on-policy distillation — implemented in small, readable, robust file
 that together form a miniature version of production frameworks like
 [slime](https://github.com/THUDM/slime) and [verl](https://github.com/verl-project/verl).
 
-## 0. Status (updated 2026-07-08 — keep this section current)
+## 0. Status (updated 2026-07-09 — keep this section current)
 
 **Built and tested (58 passing tests, all CPU/MPS):** the full RLVR stack —
 `HFEngine` (rollouts on any device, exact behavior logprobs), losses
@@ -33,9 +33,11 @@ sources, SFT batching), and a working GSM8K GRPO recipe
 
 **Decided and documented, not yet built:** VLLMEngine + NCCL weight sync +
 FSDP2 + placement (need the CUDA box; docs/precision.md, DESIGN §6), packing
-(docs/packing.md), agentic runners (docs/agentic_rl.md), RLOO, DPO
-(notes/dpo_derivation.md ready), on-policy distillation, eval harness,
-wandb logging, checkpoint/resume schedule.
+(docs/packing.md — prototyped and ROLLED BACK for readability, 2026-07-09;
+build-or-not is an open decision), fast-RL throughput layer (continuous
+batching / in-flight updates — docs/fast_rl.md), agentic runners
+(docs/agentic_rl.md), RLOO, DPO (notes/dpo_derivation.md ready), on-policy
+distillation, eval harness, wandb logging, checkpoint/resume schedule.
 
 **Agreed build order:** SFT recipe → GSM8K RLVR at real scale (GPU) → DPO →
 agentic. PPO is a permanent non-goal (§ non-goals).
@@ -276,7 +278,8 @@ miniRL/
 ├── tests/                       # correctness tests (see §8)
 ├── docs/                        # one short note per topic. Exist: sync_training.md,
 │                                #   async_training.md, precision.md, agentic_rl.md,
-│                                #   packing.md; production_gap.md to come
+│                                #   packing.md, fast_rl.md (continuous batching +
+│                                #   in-flight updates); production_gap.md to come
 └── notes/                       # THEORY derivations, imported from the author's
                                  #   rl_notes vault (derivations only — the vault's
                                  #   annotated loss implementations ARE minirl/algos/):
@@ -473,10 +476,13 @@ The sync controller is a degenerate case of the async one (1 worker,
 `max_version_lag = 0`) — but we keep both files because the sync one should be
 readable in five minutes.
 
-### Sequence packing (planned; slime's THD format in miniature)
+### Sequence packing (design only — build-or-not is an open decision)
 
 Full implementation design — file-by-file changes, worked example, testing
-strategy: **docs/packing.md**.
+strategy: **docs/packing.md**. A prototype was built and rolled back
+(2026-07-09): correct (packed==padded pinned by tests before removal), but it
+threaded an optional second layout through Batch/trainer/aggregate/gspo and
+made the core files harder to read — readability wins here.
 
 RL batches have brutal length variance, so padded (B, T) rectangles are
 mostly pad — slime doesn't even have a padded path: every Megatron microbatch
