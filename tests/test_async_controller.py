@@ -13,7 +13,7 @@ import torch
 from torch import nn
 
 from minirl.algos import GRPOConfig, grpo_loss
-from minirl.async_controller import fit_async
+from minirl.controllers import fit_async
 from minirl.config import CollectConfig
 from minirl.rollout.types import SamplingParams, Trajectory
 from minirl.train import TrainConfig, Trainer

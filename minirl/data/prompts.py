@@ -32,9 +32,13 @@ def hf_prompt_source(
 ) -> Callable[[int], list[tuple[Tensor, dict]]]:
     """Build a prompt_source(n) -> [(prompt_ids (T,), meta)] callable.
 
-    Shuffles once per epoch (seeded, reproducible), consumes sequentially, and
-    returns [] when the epoch is exhausted — the semantics collect_groups and
-    the async controller already handle (a short/empty return ends collection).
+    Shuffles once per epoch (seeded, reproducible) and consumes sequentially —
+    WITHOUT replacement within an epoch (a prompt dropped by dynamic sampling
+    cannot be redrawn until the next epoch's reshuffle). At the epoch boundary
+    the call returns SHORT, then the next epoch begins: this source never
+    returns [] for a non-empty dataset, so collect_groups' data-exhaustion
+    stop only fires for custom finite sources; here target_groups and
+    max_rounds are the binding stops.
     """
     order = list(range(len(dataset)))
     rng = random.Random(seed)

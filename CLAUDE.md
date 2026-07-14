@@ -22,9 +22,15 @@ glossary (symbols, shapes, the four policies, notes/ symbol mapping) is
   `/Users/mingxuanzhang/miniconda3/envs/mingxuan/bin/python` (torch+MPS,
   transformers, datasets, math-verify). Never create venvs.
 - Tests: `<that python> -m pytest tests/ -q` — keep it green; it is fast (~10s).
-- This machine is an Apple-silicon Mac: MPS + CPU only. vLLM/FSDP/packing are
-  CUDA-path features — designed and documented, exercised on a GPU box later.
-  (Packing was prototyped and rolled back for readability — docs/packing.md.)
+- This machine is an Apple-silicon Mac: MPS + CPU only. NCCL weight sync /
+  placement are CUDA-box features. FSDP2 IS implemented and tested here
+  (2-process gloo/CPU equivalence — docs/fsdp2.md); its NCCL/bf16 fast path
+  is validated on the box later.
+  vLLM RUNS LOCALLY via the vllm-metal plugin in the isolated venv
+  `~/.venv-vllm-metal` (user-approved exception to the no-venv rule; repo dev
+  stays on mingxuan) — spike findings + weight-update recipe:
+  docs/async_tier2.md §8. (Packing was prototyped and rolled back for
+  readability — docs/packing.md.)
 - Smoke recipe: `recipes/03_grpo_gsm8k.py` (GRPO on GSM8K, runs on MPS in ~2 min).
 
 ## Conventions that are LAW here

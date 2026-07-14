@@ -31,7 +31,9 @@ THE MICROBATCH RULE (docs/sync_training.md §5, pinned by the gradient-
 equivalence test; slime's docstring states the same): the denominator must be
 computed on the WHOLE MINIBATCH (minibatch_denom, once) and shared by every
 grad-accumulation slice — per-microbatch denominators silently reweight
-tokens. Under FSDP2 the same denominator additionally gets an all-reduce.
+tokens. Under FSDP2 the rule generalizes across ranks with NO collective:
+every rank computes the same denominator from the identical full batch and
+slices its rows after (train/distributed.py; docs/fsdp2.md §2).
 ================================================================================
 """
 

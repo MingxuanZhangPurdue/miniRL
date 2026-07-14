@@ -141,6 +141,10 @@ metric/assert becomes a range check.
 
 ## 5. Minimal implementation plan (single node, many GPUs)
 
+> The concrete file-by-file implementation design for stages 1-2 (the
+> step-loop engine, streaming collection, the publish mailbox, version
+> bookkeeping, and the Mac-testable seams) is **docs/async_tier2.md**.
+
 Load-bearing design decision: build `VLLMEngine` around an explicit step loop
 (or AsyncLLM-in-a-thread), because owning the loop is what makes all three
 optimizations cheap — finished groups stream out between steps (opt 1), and
@@ -153,13 +157,11 @@ weights swap in between steps (opt 3).
   Iterator[group]` on the engine + the streaming path in `collect_groups`
   (per-finished-group filter + top-up). `HFEngine` keeps the round-based path
   (HF generate cannot continuously batch; it stays the didactic engine).
-- **Stage 2 — in-flight updates.** `publish()` stops joining: it drops the
-  state dict into a one-slot mailbox and returns; the engine's step loop
-  checks the mailbox between `step()` calls and applies weights (vLLM
-  `collective_rpc` -> `load_weights`) without touching running requests.
-  Gated: `fit_async(..., inflight_updates=False)` default preserves tier-1
-  semantics, its assert, and its tests — the teaching path stays intact.
-  Version range bookkeeping per §4.
+- **Stage 2 — in-flight updates. DEFERRED (2026-07-10 decision,
+  docs/async_tier2.md §4)**: the only semantics-changing stage (mixed-policy
+  completions, kept KV), and its payoff scales with completion length — at
+  our scales drain-then-publish amortized by publish_interval is cheap.
+  Revisit when long-CoT runs make the drain measurably expensive.
 - **Stage 3 — decoupled engine replicas** (the article's +39%; only worth it
   with >1 actor GPU): `engines: list`, one rollout thread each, one shared
   result queue, per-engine weight updates with no global barrier. Mixed

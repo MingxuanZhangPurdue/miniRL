@@ -1,6 +1,6 @@
 # Async RL training: design for the basic async trainer
 
-Design note for `minirl/async_controller.py` — IMPLEMENTED (fit_async, with
+Design note for `minirl/controllers/round_based.py` — IMPLEMENTED (fit_async, with
 invariant tests in tests/test_async_controller.py). Deviations from the
 original draft, decided during review: the controller lives at the package
 top level (it orchestrates rollout AND training, it is not rollout
@@ -60,9 +60,11 @@ fresh weights, or with --partial-rollout resumed from where they stopped
 stale tokens' loss_mask). No eval mode; ordering best-effort. This is the
 GLM-5-style "learner never waits for the slowest episode" design — it matters
 for long/variable agentic episodes and is our Phase 6+ follow-up, not the
-basic trainer. Our concrete tier-2 plan (continuous batching, streaming
+basic trainer. Our tier-2 analysis (continuous batching, streaming
 collection, PipelineRL-style in-flight updates — keep-the-KV instead of
-slime's abort/requeue) lives in **docs/fast_rl.md**.
+slime's abort/requeue) lives in **docs/fast_rl.md**; the file-by-file
+implementation design (all-new-files, tier-1 untouched) in
+**docs/async_tier2.md**.
 
 ## 2. miniRL basic async = tier 1, one background future
 
@@ -79,7 +81,7 @@ one-slot future IS the pipeline. Multi-worker pools arrive only with tier 2.
   it k+1:    [ generate rollout k+2 .......]    [ train on rollout k+1   ]
 ```
 
-### Controller pseudocode (rollout/async_controller.py)
+### Controller pseudocode (controllers/round_based.py)
 
 ```python
 def fit_async(cfg, engine, learner, trainer, reward_fn, prompt_source):

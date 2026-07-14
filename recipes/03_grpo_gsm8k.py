@@ -1,4 +1,8 @@
-"""GRPO on GSM8K — the first real RLVR recipe.  python recipes/03_grpo_gsm8k.py
+"""GRPO on GSM8K — the first real RLVR recipe.
+
+    python recipes/03_grpo_gsm8k.py                          # console only
+    python recipes/03_grpo_gsm8k.py --wandb --project P --name N [--entity E]
+    WANDB_MODE=offline python recipes/03_grpo_gsm8k.py --wandb ...   # no network
 
 This is the actual recipe, with SMOKE-SIZED constants so it runs end to end on
 a Mac (MPS) in a couple of minutes. To do a real run, scale the CONFIG block
@@ -10,11 +14,15 @@ Wires together the finished stack, nothing bespoke:
   rewards.make_math_reward_fn         -> verifiable reward (boxed/last-number)
   Trainer(grpo_loss)                  -> the GRPO update
   fit_async                           -> the tier-1 async training loop
+  logging.metrics_logger              -> console line + optional wandb stream
+                                         (wandb lives HERE, never in minirl core)
 
-Missing on purpose (kept simple): eval harness, wandb, checkpointing schedule.
+Missing on purpose (kept simple): eval harness, checkpointing schedule.
 """
 
+import argparse
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 import torch
@@ -24,11 +32,12 @@ from transformers import AutoModelForCausalLM
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from minirl.algos import GRPOConfig, grpo_loss
-from minirl.async_controller import fit_async
+from minirl.controllers import fit_async
 from minirl.config import CollectConfig
 from minirl.data import hf_prompt_source
 from minirl.data.prompts import gsm8k_row
 from minirl.engine import HFEngine
+from minirl.logging import metrics_logger
 from minirl.rewards import make_math_reward_fn
 from minirl.rollout.types import SamplingParams
 from minirl.train import TrainConfig, Trainer
@@ -45,46 +54,64 @@ LR = 1e-6
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--wandb", action="store_true", help="stream metrics to wandb")
+    ap.add_argument("--project", default="minirl")
+    ap.add_argument("--name", default=None, help="wandb run name")
+    ap.add_argument("--entity", default=None, help="wandb entity (team/user)")
+    args = ap.parse_args()
+
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     print(f"device={device}  model={MODEL}")
+
+    # --- configs first, so a wandb run records the FULL experiment identity ---
+    loss_cfg = GRPOConfig(use_tis=True)  # TIS on: corrects the engine<->learner logprob gap
+    train_cfg = TrainConfig(lr=LR, ppo_epochs=1, minibatch_size=GROUP_SIZE * TARGET_GROUPS, micro_batch_size=4)
+    collect_cfg = CollectConfig(group_size=GROUP_SIZE, target_groups=TARGET_GROUPS, strategy="fixed")
+    sampling = SamplingParams(temperature=1.0, top_p=0.95, max_new_tokens=MAX_NEW_TOKENS, n=GROUP_SIZE)
+
+    run = None
+    if args.wandb:
+        import wandb  # imported HERE only — minirl core never sees it
+
+        run = wandb.init(
+            project=args.project,
+            entity=args.entity,
+            name=args.name,
+            config={
+                "model": MODEL, "device": device, "num_iterations": NUM_ITERATIONS,
+                "n_train_examples": N_TRAIN_EXAMPLES, "algo": "grpo",
+                "loss": asdict(loss_cfg), "train": asdict(train_cfg),
+                "collect": asdict(collect_cfg), "sampling": asdict(sampling),
+            },
+        )
 
     # --- models: engine (rollouts) + learner (training), both from one checkpoint ---
     engine = HFEngine(MODEL, device=device)
     learner = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.float32)
-    trainer = Trainer(
-        learner,
-        grpo_loss,
-        GRPOConfig(use_tis=True),  # TIS on: corrects the engine<->learner logprob gap
-        TrainConfig(lr=LR, ppo_epochs=1, minibatch_size=GROUP_SIZE * TARGET_GROUPS, micro_batch_size=4),
-        device=device,
-    )
+    trainer = Trainer(learner, grpo_loss, loss_cfg, train_cfg, device=device)
 
     # --- data: GSM8K prompts with gold answers riding in meta ---
     ds = load_dataset("openai/gsm8k", "main", split=f"train[:{N_TRAIN_EXAMPLES}]")
     prompt_source = hf_prompt_source(ds, engine.tokenizer, row_fn=gsm8k_row, seed=0)
     reward_fn = make_math_reward_fn(engine.tokenizer)  # grades response vs meta["answer"]
 
-    # --- run the async training loop ---
-    def log(m: dict) -> None:
-        print(
-            f"iter {m['iteration']}  reward={m['reward_mean']:.3f}  "
-            f"loss={m['loss']:+.4f}  kl={m['approx_kl']:.4f}  clip={m['clip_frac']:.3f}  "
-            f"tis={m.get('tis_mean', 1.0):.3f}  stale={m['staleness']}  "
-            f"pad={m['frac_padding']:.2f}  t_gen={m['t_generate']:.1f}s t_train={m['t_train']:.1f}s"
-        )
-
     print("starting GRPO...")
-    fit_async(
-        engine=engine,
-        trainer=trainer,
-        reward_fn=reward_fn,
-        prompt_source=prompt_source,
-        sampling=SamplingParams(temperature=1.0, top_p=0.95, max_new_tokens=MAX_NEW_TOKENS, n=GROUP_SIZE),
-        collect_cfg=CollectConfig(group_size=GROUP_SIZE, target_groups=TARGET_GROUPS, strategy="fixed"),
-        num_iterations=NUM_ITERATIONS,
-        update_weights_interval=1,
-        on_metrics=log,
-    )
+    try:
+        fit_async(
+            engine=engine,
+            trainer=trainer,
+            reward_fn=reward_fn,
+            prompt_source=prompt_source,
+            sampling=sampling,
+            collect_cfg=collect_cfg,
+            num_iterations=NUM_ITERATIONS,
+            update_weights_interval=1,
+            on_metrics=metrics_logger(run),  # console line always; wandb stream if run
+        )
+    finally:
+        if run is not None:
+            run.finish()  # flush even if the loop raised
     print("done.")
 
 
