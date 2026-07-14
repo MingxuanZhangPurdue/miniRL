@@ -112,3 +112,33 @@ episodes with early finishers produce correct per-episode trajectories.
 Deferred by decision (2026-07): build order is SFT -> RLVR recipe -> DPO,
 then this. Nothing in the trainer/controller/losses needs to change for it —
 the runner is purely additive.
+
+## 7. Qwen3 template findings (probed empirically, 2026-07-13)
+
+The default model's SHIPPED template already covers the agentic surface — no
+custom template work needed (schema stays OpenAI/HF messages+tools; the
+template renders it):
+
+- **Tools = Hermes format, built in**: schemas injected into the system block
+  in `<tools>` tags (a system turn is SYNTHESIZED if absent); calls expected
+  as `<tool_call>{json}</tool_call>`; results rendered in `<tool_response>`
+  tags — folded into a **user** turn, not a distinct tool role, so
+  assistant-only masking already treats tool output as context.
+- **Reasoning**: `enable_thinking` template variable; False pre-injects an
+  empty `<think></think>` into the generation prompt (the skip mechanism).
+
+**The trap (drives a runner design decision):** re-rendering a conversation
+STRIPS `<think>` blocks from all PREVIOUS assistant turns — thinking survives
+only in the current one. Generated-turn tokens != re-rendered-history tokens,
+so multi-turn trajectories fork:
+
+1. re-render per turn (Qwen's inference convention, saves context) — the
+   trajectory is NOT one contiguous token sequence; logprobs/masks need
+   per-turn segments; retokenization hazard class;
+2. accumulate raw generated token ids (what engines + the Trajectory
+   contract already do) — contiguous (T,) trajectory, but old think blocks
+   stay in context, spending budget and diverging from inference convention.
+
+The runner must pick one EXPLICITLY (leaning 2 for training correctness —
+it keeps the per-token logprob/mask story identical to single-turn — with 1
+as the deploy-time convention); decide when envs/ gets built.
