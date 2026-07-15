@@ -17,41 +17,46 @@ async RL, on-policy distillation — implemented in small, readable, robust file
 that together form a miniature version of production frameworks like
 [slime](https://github.com/THUDM/slime) and [verl](https://github.com/verl-project/verl).
 
-## 0. Status (updated 2026-07-09 — keep this section current)
+## 0. Status (updated 2026-07-14 — keep this section current)
 
-**Built and tested (67 passing tests, all CPU/MPS):** the full RLVR stack —
-`HFEngine` (rollouts on any device, exact behavior logprobs), losses
-grpo/gspo/cispo/sft as files + dapo/dr_grpo as named configs (`LOSSES`
-registry, algos/README.md), group advantages with pluggable `advantage_fn`,
-TIS, the three-mode reduce (`loss_agg`), dynamic sampling (`collect_groups`),
-`make_batch`, the generic `Trainer` (microbatch-exact, old-logprob recompute,
-NaN guard, AdamW-only), the tier-1 async controller (`fit_async` — there is
-no sync controller, by design), **the tier-2 streaming stack** (2026-07-10:
-`VLLMEngine` with continuous batching + `collect_groups_stream` +
-`fit_async_stream`, drain-then-publish, all-new files, fake-engine tested —
-docs/async_tier2.md; REMAINING: the real vllm-metal smoke run from
-`~/.venv-vllm-metal`, incl. EOS parity + weight-update canary), rewards
-(GSM8K math verifier + level-2 code sandbox), the data layer (chat templating
-with assistant-mask, HF prompt sources, SFT batching), and a working GSM8K
-GRPO recipe (`recipes/03_grpo_gsm8k.py`, smoke-tested on MPS end to end),
-and **the FSDP2 learner** (2026-07-13: `train/distributed.py` — shard_model +
-DistTrainer + full_state_dict; 2-rank gloo/CPU equivalence == single-process
-bit-for-bit for all three loss_agg modes; NCCL/bf16 path awaits the box —
-docs/fsdp2.md), and **wandb metric logging** (2026-07-13:
-`minirl/logging.py` — metrics_logger builds the on_metrics callback:
-namespaced keys, derived tokens_per_sec/drop_rate, iteration-as-step; wandb
-lives ONLY in recipes — core never imports it; recipe 03 wires it behind
-`--wandb`).
+**Built and tested (71 passing tests, all CPU/MPS):** the full RLVR stack —
+`HFEngine` (rollouts on any device, exact behavior logprobs) + `VLLMEngine`
+(continuous batching; Metal weight-update recipe validated, CUDA branch
+awaits the box) + `StreamAdapter` (generate()-only engines speak the
+streaming contract; one poll == one round), losses grpo/gspo/cispo/sft as
+files + dapo/dr_grpo as named configs (`LOSSES` registry, algos/README.md),
+group advantages with pluggable `advantage_fn`, TIS, the three-mode reduce
+(`loss_agg`), `make_batch`, the generic `Trainer` (microbatch-exact,
+old-logprob recompute, NaN guard, AdamW-only), **the FSDP2 learner**
+(2026-07-13: `train/distributed.py` — shard_model + DistTrainer +
+full_state_dict; 2-rank gloo/CPU equivalence == single-process for all three
+loss_agg modes; NCCL/bf16 path awaits the box — docs/fsdp2.md), **wandb
+metric logging** (`minirl/logging.py`; wandb lives ONLY in recipes; recipe 03
+wires it behind `--wandb`), rewards (GSM8K math verifier + level-2 code
+sandbox), the data layer (chat templating with assistant-mask, HF prompt
+sources, SFT batching), a working GSM8K GRPO recipe
+(`recipes/03_grpo_gsm8k.py`, smoke-tested on MPS end to end), and **THE
+fully-async controller** (2026-07-14 consolidation, docs/async_tier2.md
+§10-§11: `controllers/fully_async.py` — fit_async + collect_groups_dp; k DP
+engines via shared dealer/tally with burst-capped deals, one owner thread
+per engine, drain-ALL-then-publish, staleness ≤ publish_interval + 1; 1..m
+trainer ranks — rank 0 collects + broadcasts, followers train + join publish
+gathers, 2-rank gloo test vs single-process; dynamic sampling filters in
+`rollout/filtering.py`; `PlacementConfig` + `VLLMEngine(gpu_id=...)` for the
+single-node GPU split, slime's layout). Retired the same day: round_based /
+streaming controllers, rollout/sampling + rollout/streaming collectors
+(every one a k=1 special case of fully_async). REMAINING on-box: real
+vllm-metal smoke (EOS parity + weight canary), per-engine GPU pinning spike
+(§10a), NCCL/bf16.
 
-**Decided and documented, not yet built:** data-parallel rollout engines
-(dealer/tally design: docs/async_tier2.md §10 — build when >1 rollout GPU
-exists), in-flight weight updates (DEFERRED by decision 2026-07-10 —
-docs/async_tier2.md §4), NCCL weight sync
-+ placement (need the CUDA box; docs/precision.md, DESIGN §6),
-packing (docs/packing.md — prototyped and ROLLED BACK for readability,
-2026-07-09; build-or-not is an open decision), agentic runners
-(docs/agentic_rl.md), RLOO, DPO (notes/dpo_derivation.md ready), on-policy
-distillation, eval harness, checkpoint/resume schedule.
+**Decided and documented, not yet built:** the sync controller
+(`controllers/sync.py` — collect -> train -> publish via collect_groups_dp,
+no overlap), in-flight weight updates (DEFERRED by decision 2026-07-10 —
+docs/async_tier2.md §4), NCCL weight sync (need the CUDA box;
+docs/precision.md, DESIGN §6), packing (docs/packing.md — prototyped and
+ROLLED BACK for readability, 2026-07-09; build-or-not is an open decision),
+agentic runners (docs/agentic_rl.md), RLOO, DPO (notes/dpo_derivation.md
+ready), on-policy distillation, eval harness, checkpoint/resume schedule.
 
 **Agreed build order:** SFT recipe → GSM8K RLVR at real scale (GPU) → DPO →
 agentic. PPO is a permanent non-goal (§ non-goals).
@@ -161,23 +166,24 @@ miniRL/
 ├── pyproject.toml
 │
 ├── minirl/
-│   ├── config.py                # dataclass configs + YAML/CLI loading (single file)
+│   ├── config.py                # dataclass configs: CollectConfig + PlacementConfig
+│   │                            #   (single-node GPU split, slime's layout — §11)
 │   ├── logging.py               # [done] metrics_logger: the on_metrics callback —
 │   │                            #   namespacing + derived metrics + iteration-as-step;
 │   │                            #   wandb injected by RECIPES, never imported by core
 │   │
-│   ├── controllers/             # training drivers — one file per COLLECTION strategy
-│   │   ├── round_based.py       # [done] tier 1 (≈ slime train_async.py): one-step-off
-│   │   │                        #   loop, fit_async(); round-based collect_groups; the
-│   │   │                        #   only engine requirement is generate() — HFEngine's
-│   │   │                        #   home. No separate sync controller — sync is the
-│   │   │                        #   degenerate case (docs/async_training.md)
-│   │   ├── streaming.py         # [done] tier 2: fit_async_stream — continuous batching
-│   │   │                        #   via collect_groups_stream, drain-then-publish; same
-│   │   │                        #   held-future pipeline (docs/async_tier2.md)
-│   │   └── data_parallel.py     # (planned) tier 2 x N engines: shared dealer + tally
-│   │                            #   (docs/async_tier2.md §10); streaming.py is expected
-│   │                            #   to become its N=1 degenerate case
+│   ├── controllers/             # training drivers — exactly TWO by decision (§11)
+│   │   ├── fully_async.py       # [done] THE async loop: fit_async + collect_groups_dp —
+│   │   │                        #   k DP engines (shared dealer + tally, burst-capped
+│   │   │                        #   deals, one owner thread per engine), 1..m trainer
+│   │   │                        #   ranks (rank 0 collects + broadcasts; followers train
+│   │   │                        #   + join publish gathers), drain-ALL-then-publish
+│   │   │                        #   (docs/async_tier2.md §10-§11). round_based.py /
+│   │   │                        #   streaming.py / data_parallel.py retired 2026-07-14 —
+│   │   │                        #   both tiers were k=1 special cases of this file
+│   │   └── sync.py              # (planned) collect -> train -> publish, no overlap;
+│   │                            #   same collector, no pipeline slot — the debugging
+│   │                            #   and teaching reference
 │   │
 │   ├── models/
 │   │   ├── hf.py                # load_policy()/load_ref(): AutoModelForCausalLM +
@@ -187,19 +193,22 @@ miniRL/
 │   │                            #   no critic: PPO is out of scope, see non-goals)
 │   │
 │   ├── engine/                  # rollout backends, pluggable (≈ verl's rollout worker)
-│   │   │                        # engines are duck-typed: generate(prompts, params)
-│   │   │                        #   -> Trajectories + load_weights(sd, version);
-│   │   │                        #   contract documented on rollout/types.SamplingParams
+│   │   │                        # engines are duck-typed on the STREAMING contract:
+│   │   │                        #   submit/poll/stash/drain/n_inflight + load_weights
+│   │   │                        #   + pad_id; sampling side on rollout/types.SamplingParams
 │   │   ├── vllm_engine.py       # [done] PRIMARY backend: low-level LLMEngine step loop
-│   │   │                        #   (continuous batching); tier-1 generate() + tier-2
-│   │   │                        #   submit/poll/stash/drain; weight updates via callable
-│   │   │                        #   RPC + safetensors path (Metal recipe validated,
-│   │   │                        #   CUDA branch awaits box; docs/async_tier2.md §8);
-│   │   │                        #   runs on Mac via vllm-metal (~/.venv-vllm-metal)
+│   │   │                        #   (continuous batching); generate() + streaming
+│   │   │                        #   interface; gpu_id pinning for DP placement (§11);
+│   │   │                        #   weight updates via callable RPC + safetensors path
+│   │   │                        #   (Metal recipe validated, CUDA branch awaits box;
+│   │   │                        #   docs/async_tier2.md §8); Mac: vllm-metal venv
 │   │   ├── hf_engine.py         # REFERENCE backend: HFEngine wraps batched
 │   │   │                        #   model.generate on its own HF model copy;
 │   │   │                        #   returns exact sampling logprobs; runs on
 │   │   │                        #   CUDA / MPS / CPU — the local-dev + CI path
+│   │   ├── stream_adapter.py    # [done] StreamAdapter: generate()-only engine ->
+│   │   │                        #   streaming contract; one poll == one ROUND (the
+│   │   │                        #   retired tier 1 as an engine property, §11)
 │   │   └── README.md            # when to use which; the logprob-mismatch story
 │   │
 │   ├── data/                    # HF `datasets` does loading/caching/splits — we only
@@ -255,17 +264,16 @@ miniRL/
 │   │   ├── types.py             # [done] SamplingParams, Trajectory, Batch (the data contract)
 │   │   ├── batching.py          # [done] make_batch (pad + advantages), mini/microbatch slicing
 │   │   │                        #   [planned] pack_batch: sequence packing (see §6, packing)
-│   │   ├── sampling.py          # [done] batch collection: fixed vs DAPO dynamic filtering
-│   │   │                        #   (zero-gradient groups; mini slime over-sampling loop)
-│   │   ├── streaming.py         # [done] tier-2 collection: collect_groups_stream —
-│   │   │                        #   same filter/refill rule, pull-based off engine.poll();
-│   │   │                        #   leftovers carry over (docs/async_tier2.md §3)
+│   │   ├── filtering.py         # [done] group filters (reward_nonzero_std = DAPO dynamic
+│   │   │                        #   sampling) + RewardFn/GroupFilter types. Collection
+│   │   │                        #   itself lives in controllers/fully_async.py —
+│   │   │                        #   sampling.py and streaming.py retired 2026-07-14 (§11)
 │   │   ├── buffer.py            # (dropped: tier 2 shipped WITHOUT queues — the engine
 │   │   │                        #   stash + held-future join replaced them)
-│   │   ├── placement.py         # GPU placement: colocated vs disaggregated;
-│   │   │                        #   maps learner ranks / engine workers to devices
-│   │   └── weight_sync.py       # learner → engine weight publication (versioned);
-│   │                            #   NCCL broadcast across GPUs, shm fallback on CPU
+│   │   └── weight_sync.py       # (planned) NCCL learner → engine weight publication;
+│   │                            #   today's path is full_state_dict + safetensors file.
+│   │                            #   (placement.py dropped: PlacementConfig in config.py
+│   │                            #   + VLLMEngine gpu_id cover single-node DP, §11)
 │   │
 │   ├── rewards/
 │   │   ├── math.py              # [done] extract (boxed/last-number) -> normalize ->
@@ -372,7 +380,7 @@ Each algorithm = one loss file + one recipe + one doc note. Ordered as a study p
    grpo.py, gspo.py (sequence-level ratio), cispo.py (stop-gradient clipped
    IS weight); variants reachable through GRPO's fields are NAMED CONFIGS in
    the LOSSES registry — DAPO (clip-higher + token reduce; dynamic sampling
-   via rollout/sampling.py) and Dr. GRPO (no ÷std + constant reduce).
+   via the collector filter, rollout/filtering.py) and Dr. GRPO (no ÷std + constant reduce).
    Formula table, notation, and the full config reference: algos/README.md.
 5. **PPO with critic** — [decided 2026-07: NOT implemented] — value-function
    training + GAE is a whole second training loop for an algorithm the RLVR
@@ -448,7 +456,7 @@ loop:
 Simple, on-policy, but the GPU alternates between generation and training —
 exactly the inefficiency GLM-5's async infra removes.
 
-### Asynchronous (`controllers/round_based.py`)
+### Asynchronous (`controllers/fully_async.py`)
 
 Built in two tiers, mirroring slime (full study + design: docs/async_training.md):
 
@@ -610,7 +618,7 @@ real frameworks. This table is the contract; keep it updated as code lands.
 | Actor / rollout placement | `rollout/placement.py`: **colocated vs disaggregated** GPU assignment on one node | **colocated vs disaggregated** modes on GPU groups | **hybrid engine**: actor & rollout share GPUs, offload/reload between phases |
 | Weight sync learner → sampler | `rollout/weight_sync.py`: versioned NCCL broadcast (shm fallback on CPU) | bucketed NCCL broadcast (disaggregated) or CUDA IPC (colocated) | `sync_model_weights` / resharding between FSDP and vLLM formats |
 | Data buffer | `rollout/buffer.py` (bounded queue + staleness filter) | Data Buffer module (also the custom-data/partial-rollout hook point) | replay/experience handling inside the trainer loop |
-| Async / off-policy RL | `controllers/` (round_based + streaming), `version` tag + TIS correction | asynchronous training mode; partial rollouts | one-step-off async mode; agent-loop workers |
+| Async / off-policy RL | `controllers/fully_async.py`, `version` tag + TIS correction | asynchronous training mode; partial rollouts | one-step-off async mode; agent-loop workers |
 | Reward plumbing | `rewards/` fns taking `Trajectory` → float | custom reward via `--custom-rm-path` | `RewardManager` (rule-based fns or RM worker) |
 | Advantage estimators | `algos/advantage.py` (GAE, group-norm, RLOO) | selected per algorithm in training scripts | `core_algos.py` advantage estimator registry (`grpo`, `gae`, `rloo`, ...) |
 | Algorithm zoo | `algos/*.py` one file per loss | PPO/GRPO variants via CLI flags | `ppo`, `grpo`, `dapo`, `rloo`, ... trainer configs |

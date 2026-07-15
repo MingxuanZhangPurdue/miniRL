@@ -10,7 +10,7 @@ Two operating modes, one class:
   tier 1: generate(prompt_ids, params) — submit everything, poll until done.
     Satisfies the HFEngine duck-type exactly; drop-in for fit_async.
   tier 2: submit() / poll() / drain() — the streaming interface consumed by
-    rollout/streaming.collect_groups_stream and minirl/controllers/streaming.
+    controllers/fully_async.py (collect_groups_dp drives poll() directly).
 
 IN-FLIGHT UPDATES ARE DEFERRED (decision 2026-07-10, docs/async_tier2.md §4):
 load_weights REQUIRES a quiescent engine (drain-then-publish, asserted), so
@@ -50,15 +50,32 @@ class VLLMEngine:
         model_name_or_path: str,
         dtype: str = "bfloat16",
         max_model_len: int = 4096,
-        seed: int = 0,
+        seed: int = 0,  # DP fleets: give each engine a different seed (uncorrelated sampling)
+        gpu_id: int | None = None,  # pin to ONE GPU (DP placement, docs/async_tier2.md §11)
     ):
         from transformers import AutoTokenizer
         from vllm import EngineArgs, LLMEngine
 
         self.model_name_or_path = model_name_or_path
-        self.engine = LLMEngine.from_engine_args(
-            EngineArgs(model=model_name_or_path, dtype=dtype, max_model_len=max_model_len, seed=seed)
-        )
+        # GPU pinning by env (§10(a)): the V1 EngineCore SUBPROCESS spawned
+        # inside from_engine_args inherits CUDA_VISIBLE_DEVICES; the parent's
+        # value is restored right after. Two caveats until the on-box spike:
+        # init the learner/torch.cuda BEFORE any engine (CUDA reads the env
+        # once at context creation), and construct engines sequentially (the
+        # mutation is process-global).
+        old_cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if gpu_id is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        try:
+            self.engine = LLMEngine.from_engine_args(
+                EngineArgs(model=model_name_or_path, dtype=dtype, max_model_len=max_model_len, seed=seed)
+            )
+        finally:
+            if gpu_id is not None:
+                if old_cvd is None:
+                    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+                else:
+                    os.environ["CUDA_VISIBLE_DEVICES"] = old_cvd
         tok = AutoTokenizer.from_pretrained(model_name_or_path)
         eos = tok.eos_token_id
         self.pad_id = tok.pad_token_id if tok.pad_token_id is not None else int(eos)

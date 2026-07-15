@@ -313,7 +313,7 @@ torch-MPS-allocator assert during engine teardown (harmless, post-run).
 | engine stash | requeued aborted groups | queue backlog | ours holds only COMPLETED single-version work |
 | publish_interval | --update-weights-interval | sync-every-N-steps | staleness bound = interval + 1 (stash carryover) |
 
-## 10. Data-parallel engines (DESIGN ONLY — build when >1 rollout GPU exists)
+## 10. Data-parallel engines (IMPLEMENTED 2026-07-14 — controllers/data_parallel.py, CPU-tested; on-box validation pending)
 
 The scenario: one node, model fits on a single GPU, k GPUs reserved for
 rollouts (e.g. 8 GPUs = 4 rollout + 4 FSDP training). Layout decision first:
@@ -364,12 +364,25 @@ files untouched — the packing rule):
         (sequential loads first; per-engine staggered updates are the
         article's +39% "decoupled actors" — a later optimization, not v1)
 
-`collect_shared` is a small variant of `collect_groups_stream` living in the
-DP file (need comes from the tally, kept goes to the shared list) — a NEW
-function rather than optional parameters threaded through the existing
-collector, per the readability rule. Leftovers/stash per engine and the
-staleness bound (publish_interval + 1) carry over unchanged: every engine
-drains at every publish, so completions stay single-version.
+`_collect_one` (nee collect_shared) is a small variant of
+`collect_groups_stream` living in the DP file (need comes from the tally,
+kept goes to the shared list) — a NEW function rather than optional
+parameters threaded through the existing collector, per the readability
+rule. Leftovers/stash per engine and the staleness bound
+(publish_interval + 1) carry over unchanged: every engine drains at every
+publish, so completions stay single-version.
+
+REFINEMENT FOUND AT IMPLEMENTATION (2026-07-14) — the burst cap: each deal
+is bounded by `ceil(target/k)` minus the engine's own in-flight count.
+Uncapped, "deals itself `need` prompts" lets whichever collector's thread
+runs FIRST deal itself the entire target at t=0 (need starts at target),
+pinning every prompt to one engine before the others wake — dealt work
+cannot migrate, so the promised 22/17/14/11 emergence would collapse to
+64/0/0/0. The cap is the late-binding half of "deal, don't partition":
+commit at most a fair burst, leave the rest claimable. Replacement deals
+after drops are what fast engines then win (pinned by the paced-engine
+load-balance test). Also decided at landing: streaming.py is KEPT as the
+readable k=1 teaching case, not merged away (rationale in the DP banner).
 
 Open question for a 30-minute spike ON THE BOX (the controller design is
 duck-typed and agnostic to the answer): how the k engines are instantiated —
@@ -384,3 +397,75 @@ k FakeStreamEngines with DIFFERENT finish speeds sharing a dealer + tally:
 no prompt dealt twice; global target met exactly; the fast engine dealt
 strictly more prompts than the slow one (load balance observed, not assumed);
 group_ids unique after restamp; publish drains all k; staleness bound holds.
+
+## 11. The two-controller consolidation + single-node placement (2026-07-14)
+
+DECISION: the repo keeps exactly TWO training drivers — `controllers/sync.py`
+(collect -> train -> publish, no overlap; NOT YET BUILT) and
+`controllers/fully_async.py` (`fit_async`: everything §1-§10 built, in one
+loop). `round_based.py` and `streaming.py` are RETIRED: both were k=1 special
+cases of the DP loop, and three near-identical pipeline files cost more
+readability than the one they teach. What each contributed survives:
+
+- round_based's engine story (HFEngine, generate()-only, the MPS dev path)
+  survives via `engine/stream_adapter.py`: StreamAdapter wraps any
+  generate()-engine with the streaming interface — one poll() == one ROUND
+  (everything submitted since the last poll generates as a single blocking
+  batch). Under the same collector, continuous batching degenerates to
+  round-based collection: tier 1 is now a property of the ENGINE, not a
+  controller file. HFEngine itself is untouched (additive-files rule, §0).
+- streaming.py's fit_async_stream was fully_async minus dealer/tally; its
+  walkthrough comments moved into fully_async.py. rollout/streaming.py's
+  collect_groups_stream went with it (`_collect_one` in the DP file is that
+  function against the shared tally). rollout/sampling.py (round-based
+  collect_groups) went too, in a follow-up the same day: the sync controller
+  will ALSO collect via collect_groups_dp — continuous batching is how
+  collection works regardless of sync/async, and StreamAdapter covers
+  generate()-only engines. Its filters (reward_nonzero_std, GroupFilter,
+  RewardFn) moved to rollout/filtering.py; CollectConfig lost the
+  round-only knob oversample_batch_size. The plain Trainer STAYS: DistTrainer
+  subclasses it (one trainer + a sharding override, not two trainers), and
+  world=1 (MPS/dev) must not pay dist init or FSDP2 wrapping.
+
+### Placement: how slime specifies GPUs, and our translation
+
+slime (utils/arguments.py + sglang_engine.get_base_gpu_id): training and
+inference GPUs are DISJOINT by default — `--actor-num-gpus-per-node` trainer
+ranks first, then `--rollout-num-gpus` engine GPUs starting at
+`num_actor_gpus + engine_rank * gpus_per_engine`; `--rollout-num-gpus-per-
+engine` is TP width (our permanent 1 — DP only); `--colocate` shares GPUs but
+drags the whole offload/onload dance (release/resume_memory_occupation) —
+production_gap, not study material.
+
+miniRL: `PlacementConfig(num_train_gpus, num_rollout_gpus)` in config.py —
+`train_gpu_ids` = 0..t-1, `rollout_gpu_ids` = t..t+r-1 (slime's layout), and
+`VLLMEngine(gpu_id=...)` pins one engine to one GPU by setting
+CUDA_VISIBLE_DEVICES around engine construction (the §10(a) mechanism: the V1
+EngineCore SUBPROCESS inherits the env; the parent's value is restored after).
+CAVEATS, on-box validation pending: construct the learner / touch
+torch.cuda BEFORE the engines (CUDA reads the env once at context creation),
+and construct engines sequentially (env mutation is process-global). Fallback
+if the spike disproves inheritance: one OS process per engine (§10(c)).
+No colocate mode: on the Mac, MPS timeshare with no machinery IS the
+degenerate case; on a box, give the engine its own GPU.
+
+### One controller, 1..m trainer ranks (folds in fsdp2.md §8)
+
+`fit_async(engines, trainer, ...)` is called identically on every rank
+(torchrun runs the same recipe; configs must agree across ranks):
+
+    rank 0     owns the engines + collection thread exactly as §10; after
+               make_batch, broadcast_object_list ships the Batch (CPU tensors)
+               to all ranks; publishes via full_state_dict() at intervals.
+    rank > 0   a small follower loop: receive batch -> fit_batch -> at
+               publish iterations, participate in the full_state_dict gather
+               (a collective: every rank must call it) and discard the result.
+               Followers pass engines=[].
+
+world == 1 (plain Trainer, Mac path): no dist init, no broadcast, byte-for-
+byte the §10 loop. world > 1 requires DistTrainer (full-batch-identical
+semantics: docs/fsdp2.md §2) and B % world == 0.
+
+Async wants >= 2 devices to actually overlap (slime REQUIRES disjoint GPUs
+unless colocate); on one device the loop still runs correctly — generation
+and training just timeshare (the Mac smoke reality since tier 1).

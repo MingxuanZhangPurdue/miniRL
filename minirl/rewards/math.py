@@ -100,8 +100,8 @@ def math_reward(response_text: str, gold: str) -> float:
 
 
 def make_math_reward_fn(tokenizer, answer_key: str = "answer") -> Callable[[Trajectory], float]:
-    """Glue for collect_groups: decode the RESPONSE tokens only and grade them
-    against the label that label-plumbing put in traj.meta (see sampling.py)."""
+    """Glue for the collector: decode the RESPONSE tokens only and grade them
+    against the label that label-plumbing put in traj.meta (prompt-source meta)."""
 
     def reward_fn(traj: Trajectory) -> float:
         response = tokenizer.decode(traj.input_ids[traj.prompt_len :], skip_special_tokens=True)

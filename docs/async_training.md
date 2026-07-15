@@ -1,7 +1,18 @@
 # Async RL training: design for the basic async trainer
 
-Design note for `minirl/controllers/round_based.py` — IMPLEMENTED (fit_async, with
-invariant tests in tests/test_async_controller.py). Deviations from the
+**RETIRED AS CODE, KEPT AS TEACHING (2026-07-14).** The round-based
+controller this doc designed was removed in the two-controller consolidation
+(docs/async_tier2.md §11): `controllers/fully_async.py` IS this loop
+generalized — k engines instead of one, streaming collection instead of
+rounds — and the HFEngine path survives via `engine/stream_adapter.py` (one
+poll == one round). Everything below still teaches the pipeline: the
+held-future join, the staleness bound, and the slime mirror are unchanged in
+the survivor. (Round-based collect_groups was retired too — the planned
+`controllers/sync.py` will collect via collect_groups_dp; the filters live
+on in rollout/filtering.py.)
+
+Original design note (historical) for `minirl/controllers/round_based.py` —
+was implemented as fit_async with invariant tests. Deviations from the
 original draft, decided during review: the controller lives at the package
 top level (it orchestrates rollout AND training, it is not rollout
 machinery), there is NO separate sync controller (sync = this loop with the

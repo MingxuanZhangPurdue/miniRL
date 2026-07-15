@@ -6,10 +6,11 @@ import pytest
 import torch
 
 from minirl.config import CollectConfig
+from minirl.controllers import collect_groups_dp
+from minirl.engine import StreamAdapter
 from minirl.rewards import code_reward, extract_code, extract_final_answer, grade_answer, math_reward, run_python
 from minirl.rewards.math import extract_boxed
-from minirl.rollout.sampling import collect_groups
-from minirl.rollout.types import Trajectory
+from minirl.rollout.types import SamplingParams, Trajectory
 
 # ---------------- math: extraction ----------------
 
@@ -89,7 +90,27 @@ def test_sandbox_stray_writes_land_in_tempdir(tmp_path):
     assert not os.path.exists("output.txt")  # ...but never lands in OUR cwd
 
 
-# ---------------- label plumbing in collect_groups ----------------
+# ---------------- label plumbing through the collector ----------------
+
+SAMPLING2 = SamplingParams(max_new_tokens=2, n=2)
+CFG2 = CollectConfig(group_size=2, target_groups=2)
+
+
+class GenShim:
+    """generate()-duck-type around a plain closure, so a test 'engine' is one
+    lambda; StreamAdapter turns it into a streaming engine for the collector."""
+
+    pad_id = 0
+    version = 0
+
+    def __init__(self, fn):
+        self.fn = fn
+
+    def generate(self, prompts, params):
+        return self.fn(prompts)
+
+    def load_weights(self, named_tensors, version):
+        self.version = version
 
 
 def mk_traj(prompt: torch.Tensor, last: int) -> Trajectory:
@@ -112,7 +133,8 @@ def test_prompt_meta_reaches_reward_fn():
         seen.append(traj.meta["answer"])  # label arrived BEFORE reward ran
         return float(traj.input_ids[-1].item())
 
-    trajs, stats = collect_groups(generate, reward_fn, prompt_source, CollectConfig(group_size=2, target_groups=2))
+    engine = StreamAdapter(GenShim(generate))
+    trajs, stats = collect_groups_dp([engine], reward_fn, prompt_source, CFG2, SAMPLING2)
     assert stats["groups"] == 2 and seen == ["20", "20", "21", "21"]
     assert trajs[0].meta["answer"] == "20" and trajs[2].meta["answer"] == "21"
     assert trajs[0].meta["group_id"] == 0  # group ids still assigned
@@ -128,7 +150,9 @@ def test_reward_fn_none_for_env_scored_episodes():
                 out.append(t)
         return out
 
-    trajs, _ = collect_groups(
-        generate, None, lambda n: [torch.tensor([1])] * n, CollectConfig(group_size=2, target_groups=1)
+    engine = StreamAdapter(GenShim(generate))
+    trajs, _ = collect_groups_dp(
+        [engine], None, lambda n: [torch.tensor([1])] * n,
+        CollectConfig(group_size=2, target_groups=1), SAMPLING2,
     )
     assert all(t.reward == 0.75 for t in trajs)  # untouched by the collector

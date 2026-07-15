@@ -49,7 +49,7 @@ CISPO later removes; see cispo.py).
 --------------------------------------------------------------------------------
  WHERE THE OTHER PIPELINE STEPS LIVE  (rl_notes STEP numbering)
 --------------------------------------------------------------------------------
-  STEP 0  rollout: G completions/prompt    engine.generate + rollout/sampling.py
+  STEP 0  rollout: G completions/prompt    engines + controllers/fully_async.py
   STEP 1  bookkeeping: old/ref logprobs    trainer.compute_logprobs (fp32, frozen)
   STEP 2  group-relative advantage         algos/advantage.py (grpo_advantages)
   STEP 3  the loss (THIS FILE)             called per microbatch by trainer.step

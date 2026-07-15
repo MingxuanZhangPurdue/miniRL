@@ -130,11 +130,13 @@ Two things the equivalence test caught that documentation alone wouldn't:
   gloo path is what the local tests pin, the NCCL path gets validated on the
   box.
 
-## 8. Controller wiring (documented now, built with the GPU recipes)
+## 8. Controller wiring (BUILT 2026-07-14 — inside controllers/fully_async.py)
 
-Rank 0 runs the engine + collection exactly as today (fit_async /
-fit_async_stream unchanged); after collation rank 0 broadcasts the Batch
-(torch.distributed broadcast_object_list — CPU tensors, small at study
-scale); every rank calls DistTrainer.fit_batch(full_batch); rank 0 publishes
-via full_state_dict(). A thin `fit_*_ddp` wrapper owns the broadcast — a new
-file when it lands, controllers/ per the naming scheme.
+Rank 0 runs the engines + collection exactly as before; after collation rank
+0 broadcasts the Batch (torch.distributed broadcast_object_list — CPU
+tensors, small at study scale); every rank calls
+DistTrainer.fit_batch(full_batch); rank 0 publishes via full_state_dict()
+(a gather COLLECTIVE — followers participate and discard). No separate
+`fit_*_ddp` wrapper landed: the two-controller consolidation
+(docs/async_tier2.md §11) folded the rank gating into `fit_async` itself —
+ranks > 0 take a small follower loop; engines live on rank 0 only.

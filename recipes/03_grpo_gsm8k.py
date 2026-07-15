@@ -10,12 +10,20 @@ a Mac (MPS) in a couple of minutes. To do a real run, scale the CONFIG block
 
 Wires together the finished stack, nothing bespoke:
   data.hf_prompt_source + gsm8k_row   -> prompts with gold answers in meta
-  HFEngine                            -> rollouts (bf16 CUDA / fp32 MPS)
+  StreamAdapter(HFEngine)             -> rollouts (bf16 CUDA / fp32 MPS); the
+                                         adapter speaks the streaming contract
+                                         (one poll == one round)
   rewards.make_math_reward_fn         -> verifiable reward (boxed/last-number)
   Trainer(grpo_loss)                  -> the GRPO update
-  fit_async                           -> the tier-1 async training loop
+  fit_async                           -> THE fully-async loop (k=1 engine,
+                                         world=1 — its smallest configuration)
   logging.metrics_logger              -> console line + optional wandb stream
                                          (wandb lives HERE, never in minirl core)
+
+Scaling this recipe = swapping the CONFIG block + the engine list: on a GPU
+box, engines = [VLLMEngine(MODEL, gpu_id=g, seed=g) for g in
+placement.rollout_gpu_ids] and torchrun provides the trainer ranks
+(docs/async_tier2.md §11).
 
 Missing on purpose (kept simple): eval harness, checkpointing schedule.
 """
@@ -36,7 +44,7 @@ from minirl.controllers import fit_async
 from minirl.config import CollectConfig
 from minirl.data import hf_prompt_source
 from minirl.data.prompts import gsm8k_row
-from minirl.engine import HFEngine
+from minirl.engine import HFEngine, StreamAdapter
 from minirl.logging import metrics_logger
 from minirl.rewards import make_math_reward_fn
 from minirl.rollout.types import SamplingParams
@@ -88,6 +96,7 @@ def main() -> None:
 
     # --- models: engine (rollouts) + learner (training), both from one checkpoint ---
     engine = HFEngine(MODEL, device=device)
+    engines = [StreamAdapter(engine)]  # k=1; a GPU box lists one VLLMEngine per rollout GPU
     learner = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.float32)
     trainer = Trainer(learner, grpo_loss, loss_cfg, train_cfg, device=device)
 
@@ -99,14 +108,14 @@ def main() -> None:
     print("starting GRPO...")
     try:
         fit_async(
-            engine=engine,
+            engines=engines,
             trainer=trainer,
             reward_fn=reward_fn,
             prompt_source=prompt_source,
             sampling=sampling,
             collect_cfg=collect_cfg,
             num_iterations=NUM_ITERATIONS,
-            update_weights_interval=1,
+            publish_interval=1,
             on_metrics=metrics_logger(run),  # console line always; wandb stream if run
         )
     finally:

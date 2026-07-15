@@ -1,5 +1,5 @@
 """RL prompt sources over HF datasets — the (n) -> [(ids, meta)] callable that
-collect_groups consumes (rollout/sampling.py). HF `datasets` owns loading,
+the collector consumes (controllers/fully_async.collect_groups_dp). HF `datasets` owns loading,
 caching, and splits; we only shuffle, adapt rows, and hand out tokenized
 prompts with their labels in meta.
 """
@@ -36,7 +36,7 @@ def hf_prompt_source(
     WITHOUT replacement within an epoch (a prompt dropped by dynamic sampling
     cannot be redrawn until the next epoch's reshuffle). At the epoch boundary
     the call returns SHORT, then the next epoch begins: this source never
-    returns [] for a non-empty dataset, so collect_groups' data-exhaustion
+    returns [] for a non-empty dataset, so the collector's data-exhaustion
     stop only fires for custom finite sources; here target_groups and
     max_rounds are the binding stops.
     """
