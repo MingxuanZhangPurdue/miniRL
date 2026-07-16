@@ -223,7 +223,7 @@ miniRL/
 │   │   │                        #   (RL) + encode_conversation (SFT: assistant-only
 │   │   │                        #   loss_mask via incremental prefix diffing — the one
 │   │   │                        #   hard algorithm here; ≈ slime MultiTurnLossMaskGenerator)
-│   │   ├── prompts.py           # hf_prompt_source(name, split, row_fn, tok) -> the
+│   │   ├── prompts.py           # HFPromptSource(dataset, tok, row_fn) -> the
 │   │   │                        #   (n)->[(ids, meta)] callable collect_groups expects
 │   │   ├── sft.py               # HF conversations -> Trajectory(logprobs=0) -> make_batch
 │   │   │                        #   (an SFT example IS a Trajectory; reuses RL collation)

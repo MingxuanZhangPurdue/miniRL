@@ -23,14 +23,13 @@ def gsm8k_row(row: dict) -> tuple[list[Message], dict]:
     return messages, {"answer": row["answer"]}
 
 
-def hf_prompt_source(
-    dataset,  # a datasets.Dataset (already loaded/split by the caller)
-    tokenizer,
-    row_fn: RowFn = gsm8k_row,
-    enable_thinking: bool = False,
-    seed: int = 0,
-) -> Callable[[int], list[tuple[Tensor, dict]]]:
-    """Build a prompt_source(n) -> [(prompt_ids (T,), meta)] callable.
+class HFPromptSource:
+    """prompt_source(n) -> [(prompt_ids (T,), meta)] over an HF dataset.
+
+    A callable object rather than a closure so the sampling state is NAMED
+    and inspectable (`src.epoch`, `src.cursor`) instead of hidden in cells.
+    The collector (and the DP dealer, which calls this under the tally lock)
+    only sees the callable contract.
 
     Shuffles once per epoch (seeded, reproducible) and consumes sequentially —
     WITHOUT replacement within an epoch (a prompt dropped by dynamic sampling
@@ -40,24 +39,35 @@ def hf_prompt_source(
     stop only fires for custom finite sources; here target_groups and
     max_rounds are the binding stops.
     """
-    order = list(range(len(dataset)))
-    rng = random.Random(seed)
-    rng.shuffle(order)
-    cursor = 0
-    epoch = 0
 
-    def prompt_source(n: int) -> list[tuple[Tensor, dict]]:
-        nonlocal cursor, epoch, order
+    def __init__(
+        self,
+        dataset,  # a datasets.Dataset (already loaded/split by the caller)
+        tokenizer,
+        row_fn: RowFn = gsm8k_row,
+        enable_thinking: bool = False,
+        seed: int = 0,
+    ):
+        self.dataset = dataset
+        self.tokenizer = tokenizer
+        self.row_fn = row_fn
+        self.enable_thinking = enable_thinking
+        self.seed = seed
+        self.order = list(range(len(dataset)))  # this epoch's visit order
+        self.rng = random.Random(seed)
+        self.rng.shuffle(self.order)
+        self.cursor = 0  # next index into order
+        self.epoch = 0  # completed passes over the dataset
+
+    def __call__(self, n: int) -> list[tuple[Tensor, dict]]:
         out: list[tuple[Tensor, dict]] = []
-        while len(out) < n and cursor < len(order):
-            messages, meta = row_fn(dataset[order[cursor]])
-            out.append((encode_prompt(tokenizer, messages, enable_thinking), meta))
-            cursor += 1
-        if cursor >= len(order):  # epoch boundary: reshuffle for the next pass
-            epoch += 1
-            rng.seed(seed + epoch)
-            rng.shuffle(order)
-            cursor = 0
+        while len(out) < n and self.cursor < len(self.order):
+            messages, meta = self.row_fn(self.dataset[self.order[self.cursor]])
+            out.append((encode_prompt(self.tokenizer, messages, self.enable_thinking), meta))
+            self.cursor += 1
+        if self.cursor >= len(self.order):  # epoch boundary: reshuffle for the next pass
+            self.epoch += 1
+            self.rng.seed(self.seed + self.epoch)
+            self.rng.shuffle(self.order)
+            self.cursor = 0
         return out
-
-    return prompt_source

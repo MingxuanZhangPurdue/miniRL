@@ -11,7 +11,7 @@ import torch
 from transformers import AutoTokenizer
 
 from minirl.data.chat import encode_conversation, encode_prompt
-from minirl.data.prompts import gsm8k_row, hf_prompt_source
+from minirl.data.prompts import HFPromptSource, gsm8k_row
 from minirl.data.sft import sft_batches
 
 # Override to vet a NEW model family's chat template + assistant masking:
@@ -105,7 +105,7 @@ def test_gsm8k_row_adapter():
 
 def test_prompt_source_shape_and_meta(tok):
     ds = FakeDataset([{"question": f"q{i}", "answer": f"#### {i}"} for i in range(5)])
-    src = hf_prompt_source(ds, tok, row_fn=gsm8k_row, seed=0)
+    src = HFPromptSource(ds, tok, row_fn=gsm8k_row, seed=0)
     out = src(3)
     assert len(out) == 3
     ids, meta = out[0]
@@ -114,7 +114,7 @@ def test_prompt_source_shape_and_meta(tok):
 
 def test_prompt_source_epoch_wraps_and_reshuffles(tok):
     ds = FakeDataset([{"question": f"q{i}", "answer": str(i)} for i in range(4)])
-    src = hf_prompt_source(ds, tok, seed=0)
+    src = HFPromptSource(ds, tok, seed=0)
     first_epoch = [m["answer"] for _, m in src(4)]
     assert sorted(first_epoch) == ["0", "1", "2", "3"]  # covers the whole set
     second_epoch = [m["answer"] for _, m in src(4)]
@@ -124,8 +124,8 @@ def test_prompt_source_epoch_wraps_and_reshuffles(tok):
 
 def test_prompt_source_deterministic(tok):
     ds = FakeDataset([{"question": f"q{i}", "answer": str(i)} for i in range(6)])
-    a = [m["answer"] for _, m in hf_prompt_source(ds, tok, seed=7)(6)]
-    b = [m["answer"] for _, m in hf_prompt_source(ds, tok, seed=7)(6)]
+    a = [m["answer"] for _, m in HFPromptSource(ds, tok, seed=7)(6)]
+    b = [m["answer"] for _, m in HFPromptSource(ds, tok, seed=7)(6)]
     assert a == b
 
 

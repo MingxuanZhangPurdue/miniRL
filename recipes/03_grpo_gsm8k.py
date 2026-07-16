@@ -9,7 +9,7 @@ a Mac (MPS) in a couple of minutes. To do a real run, scale the CONFIG block
 (bigger groups, more iterations, a GPU + vllm engine) — nothing else changes.
 
 Wires together the finished stack, nothing bespoke:
-  data.hf_prompt_source + gsm8k_row   -> prompts with gold answers in meta
+  data.HFPromptSource + gsm8k_row     -> prompts with gold answers in meta
   StreamAdapter(HFEngine)             -> rollouts (bf16 CUDA / fp32 MPS); the
                                          adapter speaks the streaming contract
                                          (one poll == one round)
@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from minirl.algos import GRPOConfig, grpo_loss
 from minirl.controllers import fit_async
 from minirl.config import CollectConfig
-from minirl.data import hf_prompt_source
+from minirl.data import HFPromptSource
 from minirl.data.prompts import gsm8k_row
 from minirl.engine import HFEngine, StreamAdapter
 from minirl.logging import metrics_logger
@@ -102,7 +102,7 @@ def main() -> None:
 
     # --- data: GSM8K prompts with gold answers riding in meta ---
     ds = load_dataset("openai/gsm8k", "main", split=f"train[:{N_TRAIN_EXAMPLES}]")
-    prompt_source = hf_prompt_source(ds, engine.tokenizer, row_fn=gsm8k_row, seed=0)
+    prompt_source = HFPromptSource(ds, engine.tokenizer, row_fn=gsm8k_row, seed=0)
     reward_fn = make_math_reward_fn(engine.tokenizer)  # grades response vs meta["answer"]
 
     print("starting GRPO...")
