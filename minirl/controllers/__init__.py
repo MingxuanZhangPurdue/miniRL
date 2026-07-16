@@ -3,11 +3,11 @@
   fully_async.py  fit_async   THE training loop: k DP engines (streaming
                               interface; HFEngine joins via
                               engine/stream_adapter.py — one poll == one
-                              round), 1..m trainer ranks (Trainer, or
-                              DistTrainer under torchrun: rank 0 collects +
-                              broadcasts, followers train + join publishes),
-                              drain-ALL-then-publish, staleness bound
-                              publish_interval + 1.
+                              round), 1..m trainer ranks (ONE Trainer class —
+                              DDP auto-engages under torchrun; rank 0
+                              collects + broadcasts + publishes, followers
+                              only train), drain-ALL-then-publish, staleness
+                              bound publish_interval + 1.
   sync.py         (planned)   collect -> train -> publish, no overlap; the
                               debugging/teaching reference. Same collector
                               (collect_groups_dp — continuous batching applies

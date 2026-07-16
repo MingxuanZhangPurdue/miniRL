@@ -1,4 +1,5 @@
-"""The generic step engine: one trainer for SFT and every RL loss.
+"""The generic step engine: ONE trainer for SFT and every RL loss, on one GPU
+or many (world=1 is the degenerate case of the DDP loop — docs/ddp.md).
 
 Owns exactly the algorithm-agnostic parts (docs/sync_training.md §5):
 forward -> gather_logprobs -> loss_map -> ONE global aggregation -> backward,
@@ -7,6 +8,15 @@ the tier-1 rule from docs/async_training.md §2: old_logprobs are recomputed
 UNCONDITIONALLY at the start of every update phase (correct for ppo_epochs>1
 in sync, mandatory under async staleness; slime's use_rollout_logprobs=False
 default path).
+
+DISTRIBUTED (docs/ddp.md, esp. §7): if torch.distributed is initialized at
+construction, the model is DDP-wrapped and step() becomes data-parallel —
+every rank holds the IDENTICAL full minibatch, computes the GLOBAL
+denominator from its full mask, then trains only rows[rank::world];
+gradients all-reduce inside the LAST microbatch's backward (no_sync
+suppresses the rest), scaled so the mean-reduce realizes a SUM. At world=1
+every one of those lines is a no-op: the slice is all rows, the scale is
+1.0, no wrapper exists.
 
 GROUNDED IN SLIME:
   - normalization == megatron_utils/loss.py::loss_function: token mode divides
@@ -18,21 +28,32 @@ GROUNDED IN SLIME:
   - fp32 logit upcast inside gather_logprobs == slime's
     `vocab_parallel_logits.float()` (ppo_utils.py:199).
 
-Precision (docs/precision.md): this single-device trainer keeps the model in
-whatever dtype it was loaded (fp32 on MPS/CPU); bf16-compute-with-fp32-master
-stays a recipe-level autocast knob (docs/ddp.md §5). The fp32 islands (logprobs, aggregation,
-optimizer) hold regardless.
+Precision (docs/precision.md): the model trains in whatever dtype it was
+loaded (fp32 on MPS/CPU); bf16 on the CUDA box is a recipe-level autocast
+knob, measured before built (docs/ddp.md §5). The fp32 islands (logprobs,
+aggregation, optimizer) hold regardless.
 """
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from minirl.algos.aggregate import aggregate_loss, minibatch_denom
-from minirl.rollout.batching import iter_microbatches, iter_minibatches
+from minirl.rollout.batching import iter_microbatches, iter_minibatches, slice_batch
 from minirl.rollout.types import Batch
+
+
+def setup_distributed(backend: str | None = None) -> tuple[int, int]:
+    """Join the process group (torchrun / mp.spawn set the env). -> (rank, world).
+    Call BEFORE constructing the Trainer — it reads dist state at __init__."""
+    if not dist.is_initialized():
+        dist.init_process_group(backend or ("nccl" if torch.cuda.is_available() else "gloo"))
+    return dist.get_rank(), dist.get_world_size()
 
 
 def gather_logprobs(logits: Tensor, input_ids: Tensor) -> Tensor:
@@ -61,12 +82,19 @@ class TrainConfig:
     minibatch_size: int = 32  # sequences per optimizer step
     micro_batch_size: int = 4  # sequences per fwd/bwd (grad accumulation)
     max_skipped_steps: int = 3  # consecutive non-finite steps tolerated before crashing
-    seed: int = 0  # minibatch shuffling
+    seed: int = 0  # minibatch shuffling (identical on every rank by the same seed)
 
 
 class Trainer:
     """fit_batch(batch) runs one update phase: recompute old_logprobs, then
     ppo_epochs x shuffled minibatches x microbatch-accumulated optimizer steps.
+
+    Works on 1..m GPUs from one code path: construct AFTER setup_distributed()
+    under torchrun and DDP engages automatically; without a process group it
+    is the plain single-device trainer. `self.model` is always the RAW module
+    (clean state_dict names; no-grad code skips the wrapper); `self.ddp` is
+    the training-forward module — the DDP wrapper at world>1, the raw module
+    itself at world=1.
     """
 
     def __init__(self, model: nn.Module, loss_fn, loss_cfg, cfg: TrainConfig, device: str = "cpu"):
@@ -85,6 +113,21 @@ class Trainer:
         self.shuffle_rng = torch.Generator().manual_seed(cfg.seed)
         self.step_count = 0
         self.consecutive_skipped = 0
+
+        # Distributed context, read ONCE here (docs/ddp.md): world=1 when no
+        # process group exists — the single-device path, zero dist machinery.
+        if dist.is_available() and dist.is_initialized():
+            self.rank, self.world = dist.get_rank(), dist.get_world_size()
+        else:
+            self.rank, self.world = 0, 1
+        if self.world > 1:  # DDP broadcasts rank 0's params here: identical start, provably
+            self.ddp = DDP(
+                self.model,
+                device_ids=[torch.cuda.current_device()] if device == "cuda" else None,
+                broadcast_buffers=False,  # buffers (RoPE caches etc.) are static + identical
+            )
+        else:
+            self.ddp = self.model  # no wrapper: forwards hit the module directly
 
     # ---------------- update phase ----------------
 
@@ -107,28 +150,46 @@ class Trainer:
     def step(self, mb: Batch) -> dict:
         """One optimizer step over a minibatch, microbatched for memory.
 
-        The GLOBAL denominator is computed on the whole minibatch and shared by
-        every microbatch, so each loss contribution is sum/GLOBAL — splitting
-        into microbatches cannot change the gradient (docs/sync_training.md §5).
+        mb is the FULL minibatch — identical on every rank under DDP (the
+        controller broadcasts whole batches). The GLOBAL denominator is
+        computed from the whole minibatch mask and shared by every microbatch
+        AND every rank, so neither split can change the gradient
+        (docs/sync_training.md §5, docs/ddp.md §1). The rank slice, the loss
+        scale, and no_sync below are all no-ops at world=1.
         """
-        denom = minibatch_denom(self.loss_agg, mb.loss_mask)  # minibatch-GLOBAL, shared by all micros
+        b = mb.input_ids.shape[0]
+        assert b % self.world == 0, (
+            f"batch rows {b} not divisible by world size {self.world} — "
+            "size target_groups*G accordingly (docs/ddp.md §1)"
+        )
+        denom = minibatch_denom(self.loss_agg, mb.loss_mask)  # full mask FIRST, slice after
         denom = denom.to(self.device) if isinstance(denom, torch.Tensor) else denom
+        local = mb if self.world == 1 else slice_batch(mb, torch.arange(self.rank, b, self.world))
 
+        micros = list(iter_microbatches(local, self.cfg.micro_batch_size))
         micro_metrics: list[tuple[int, dict]] = []  # (token_count, metrics)
         total_loss = 0.0
-        for micro in iter_microbatches(mb, self.cfg.micro_batch_size):
-            micro = self._to_device(micro)
-            logits = self.model(micro.input_ids, attention_mask=micro.attention_mask).logits  # (b, T, V)
-            policy_logprobs = gather_logprobs(logits, micro.input_ids)  # (b, T) f32
-            loss_map, metrics = self.loss_fn(policy_logprobs, micro, self.loss_cfg)  # (b, T)
-            loss = aggregate_loss(loss_map, micro.loss_mask, self.loss_agg, denom=denom)  # scalar
-            loss.backward()  # grads ACCUMULATE across microbatches
-            total_loss += loss.item()
+        for i, micro in enumerate(micros):
+            # grads accumulate locally; DDP's all-reduce fires only inside the
+            # LAST microbatch's backward (its default — no_sync SUPPRESSES it)
+            sync = self.ddp.no_sync() if self.world > 1 and i < len(micros) - 1 else nullcontext()
+            with sync:
+                micro = self._to_device(micro)
+                logits = self.ddp(micro.input_ids, attention_mask=micro.attention_mask).logits  # (b, T, V)
+                policy_logprobs = gather_logprobs(logits, micro.input_ids)  # (b, T) f32
+                loss_map, metrics = self.loss_fn(policy_logprobs, micro, self.loss_cfg)  # (b, T)
+                # x world: DDP mean-reduces grads; mean of world-scaled == SUM of unscaled
+                loss = aggregate_loss(loss_map, micro.loss_mask, self.loss_agg, denom=denom) * self.world
+                loss.backward()  # grads ACCUMULATE across microbatches
+            total_loss += loss.item() / self.world  # log the TRUE contribution, not the scaled one
             micro_metrics.append((int(micro.loss_mask.sum()), {k: v.item() for k, v in metrics.items()}))
 
+        # post-reduce grads are identical on every rank: vanilla local clipping
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
         if not torch.isfinite(grad_norm):
             # NaN guard: drop this step entirely, crash if it becomes a pattern.
+            # grad_norm is post-reduce, hence identical across ranks: all ranks
+            # skip together or step together — replication cannot fork here.
             self.optimizer.zero_grad(set_to_none=True)
             self.consecutive_skipped += 1
             assert self.consecutive_skipped <= self.cfg.max_skipped_steps, (
@@ -140,7 +201,7 @@ class Trainer:
             self.consecutive_skipped = 0
         self.step_count += 1
 
-        # token-weighted mean of algo metrics across microbatches
+        # token-weighted mean of algo metrics across microbatches (rank-local rows)
         total_tokens = sum(n for n, _ in micro_metrics)
         out = {
             k: sum(n * m[k] for n, m in micro_metrics) / max(total_tokens, 1)
@@ -156,7 +217,10 @@ class Trainer:
         """(B, T) f32 logprobs of batch tokens under `model` (default: the learner).
 
         Pass a frozen reference model to fill batch.ref_logprobs the same way.
-        Microbatched for memory; result lives on CPU with the batch.
+        Microbatched for memory; result lives on CPU with the batch. Always
+        the RAW module — no DDP hooks under no_grad. Every rank recomputes the
+        FULL batch (docs/ddp.md §1): duplicated FLOPs, zero communication, and
+        the wall time is one forward either way since ranks run in parallel.
         """
         model = self.model if model is None else model
         was_training = model.training

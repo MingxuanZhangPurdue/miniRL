@@ -76,12 +76,12 @@ def _worker(rank: int, port: int, out_dir: str) -> None:
     )
     tdist.init_process_group("gloo", rank=rank, world_size=WORLD)
     try:
-        from minirl.train.distributed import DistTrainer, full_state_dict
-
         results: dict = {}
         for loss_agg in LOSS_AGGS:
             torch.manual_seed(42)  # SAME init as the single-process reference
-            trainer = DistTrainer(
+            # the ONE Trainer class: constructed after init_process_group, so
+            # it picks up world=2 and DDP-wraps itself (docs/ddp.md)
+            trainer = Trainer(
                 TinyLM(),
                 grpo_loss,
                 GRPOConfig(loss_agg=loss_agg),
@@ -89,8 +89,11 @@ def _worker(rank: int, port: int, out_dir: str) -> None:
                 # no_sync local accumulation with all-reduce-on-last (docs/ddp.md §3)
                 TrainConfig(lr=1e-2, minibatch_size=8, micro_batch_size=1),
             )
+            assert trainer.world == WORLD
             trainer.fit_batch(make_batch(make_trajs(), pad_id=0)[0])
-            results[str(loss_agg)] = full_state_dict(trainer.model)
+            results[str(loss_agg)] = {
+                k: v.detach().cpu() for k, v in trainer.model.state_dict().items()
+            }
 
         # divisibility assert fires loud on ragged batches (5 rows, world 2)
         try:
@@ -114,7 +117,7 @@ def test_two_rank_ddp_matches_single_process(tmp_path):
     for loss_agg in LOSS_AGGS:
         ref = _reference_state_dict(loss_agg)
         dist_sd = results[str(loss_agg)]
-        assert set(dist_sd) == set(ref)  # full_state_dict round-trips every param name
+        assert set(dist_sd) == set(ref)  # raw-module state dict: clean names, no DDP prefix
         for k in ref:
             assert torch.allclose(dist_sd[k], ref[k], atol=1e-6), (
                 f"loss_agg={loss_agg}: parameter {k} diverged between 2-rank DDP "

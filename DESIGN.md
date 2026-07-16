@@ -28,7 +28,7 @@ files + dapo/dr_grpo as named configs (`LOSSES` registry, algos/README.md),
 group advantages with pluggable `advantage_fn`, TIS, the three-mode reduce
 (`loss_agg`), `make_batch`, the generic `Trainer` (microbatch-exact,
 old-logprob recompute, NaN guard, AdamW-only), **the DDP learner**
-(2026-07-15: `train/distributed.py` — DistTrainer + full_state_dict, DDP
+(2026-07-15, merged into `train/trainer.py` 2026-07-16 — ddp.md §7: DDP
 replicated params, SUM-via-loss-scale, no_sync accumulation; 2-rank gloo/CPU
 equivalence == single-process for all three loss_agg modes; NCCL awaits the
 box — docs/ddp.md; REPLACED the 2026-07-13 FSDP2 learner, history in
@@ -252,18 +252,16 @@ miniRL/
 │   │   └── distill.py           # on-policy distillation: reverse-KL to teacher (MOPD-lite)
 │   │
 │   ├── train/
-│   │   ├── trainer.py           # [done] generic step engine: gather_logprobs (fp32),
-│   │   │                        #   unconditional old_logprobs recompute (tier-1 rule),
-│   │   │                        #   global-denominator microbatching, grad clip, AdamW,
-│   │   │                        #   NaN guard; checkpoint/resume + LR schedule to come
-│   │   │                        # optimizer: AdamW ONLY, constructed inside trainer.py —
-│   │   │                        #   no optim.py, no optimizer zoo (principle 8); a simple
-│   │   │                        #   warmup schedule may join trainer.py when recipes need it
-│   │   └── distributed.py       # [done] DDP learner: DistTrainer (full-batch-global
-│   │                            #   denom, SUM via loss-scale, no_sync accumulation)
-│   │                            #   + full_state_dict (local copy — replicated params);
-│   │                            #   gloo/CPU-tested (docs/ddp.md; NCCL on the box.
-│   │                            #   Replaced FSDP2 2026-07-15 — docs/fsdp2.md)
+│   │   └── trainer.py           # [done] THE trainer, 1..m GPUs in one class:
+│   │                            #   gather_logprobs (fp32), unconditional old_logprobs
+│   │                            #   recompute (tier-1 rule), global-denominator
+│   │                            #   microbatching, grad clip, AdamW, NaN guard.
+│   │                            #   DDP merged in 2026-07-16 (docs/ddp.md §7): rank
+│   │                            #   slice + SUM-via-loss-scale + no_sync — all no-ops
+│   │                            #   at world=1; gloo/CPU-tested, NCCL on the box
+│   │                            #   (FSDP2 history: docs/fsdp2.md). AdamW ONLY, no
+│   │                            #   optim.py/optimizer zoo (principle 8); checkpoint/
+│   │                            #   resume + LR schedule to come
 │   │
 │   ├── rollout/                 # ≈ slime's data buffer + orchestration layer
 │   │   ├── types.py             # [done] SamplingParams, Trajectory, Batch (the data contract)
@@ -619,7 +617,7 @@ real frameworks. This table is the contract; keep it updated as code lands.
 | Overall dataflow owner | `rollout/controller.py` — a plain `fit()` loop that calls generate → reward → advantage → update | `train.py` driver over Ray actors | **single-controller**: `RayPPOTrainer.fit()` driving worker groups |
 | Data protocol between stages | `rollout/types.py` (`Trajectory`, `Batch`) | `Sample` dataclass flowing through the buffer | `DataProto` (tensordict + meta) passed between workers |
 | Rollout backend | duck-typed engines: `VLLMEngine` (primary, CUDA) or `HFEngine` (reference, any device) | SGLang server(s) behind a router | vLLM/SGLang rollout workers inside `ActorRolloutRefWorker` |
-| Training backend | `train/trainer.py` (+ optional DDP in `train/distributed.py`) | Megatron-LM actor | FSDP / Megatron actor workers |
+| Training backend | `train/trainer.py` (ONE class; DDP auto at world>1) | Megatron-LM actor | FSDP / Megatron actor workers |
 | Actor / rollout placement | `rollout/placement.py`: **colocated vs disaggregated** GPU assignment on one node | **colocated vs disaggregated** modes on GPU groups | **hybrid engine**: actor & rollout share GPUs, offload/reload between phases |
 | Weight sync learner → sampler | `rollout/weight_sync.py`: versioned NCCL broadcast (shm fallback on CPU) | bucketed NCCL broadcast (disaggregated) or CUDA IPC (colocated) | `sync_model_weights` / resharding between FSDP and vLLM formats |
 | Data buffer | `rollout/buffer.py` (bounded queue + staleness filter) | Data Buffer module (also the custom-data/partial-rollout hook point) | replay/experience handling inside the trainer loop |

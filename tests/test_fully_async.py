@@ -423,11 +423,10 @@ def _dist_worker(rank: int, port: int, out_dir: str) -> None:
     )
     tdist.init_process_group("gloo", rank=rank, world_size=WORLD)
     try:
-        from minirl.train.distributed import DistTrainer, full_state_dict
 
-        def ctor():
+        def ctor():  # the ONE Trainer: DDP engages because the process group exists
             torch.manual_seed(42)
-            return DistTrainer(
+            return Trainer(
                 TinyLM(), grpo_loss, GRPOConfig(),
                 TrainConfig(lr=1e-2, minibatch_size=4, micro_batch_size=2),
             )
@@ -437,7 +436,7 @@ def _dist_worker(rank: int, port: int, out_dir: str) -> None:
             trainer, history = _run_training(ctor, [engine], num_iterations=2)
             torch.save(
                 {
-                    "final": full_state_dict(trainer.model),
+                    "final": {k: v.detach().cpu() for k, v in trainer.model.state_dict().items()},
                     "published": engine.published,
                     "grad_norm": history[0]["grad_norm"],  # post-all-reduce: global by DDP's contract
                     "iters": len(history),

@@ -8,7 +8,7 @@ One controller serves every async configuration on a single node:
                                            controller as a degenerate case)
     k=1 VLLMEngine, world=1                tier-2 continuous batching
     k>1 VLLMEngines, world>=1              DP rollout fleet (dealer + tally)
-    world>1 (DistTrainer via torchrun)     rank 0 collects + broadcasts;
+    world>1 (torchrun; DDP auto-engages)   rank 0 collects + broadcasts;
                                            followers train + join publishes
 
 COLLECTION — deal, don't partition. No engine is "assigned batch/k prompts".
@@ -50,7 +50,7 @@ the loss is what makes this bounded off-policyness mathematically fine.
 MULTI-RANK (docs/ddp.md): torchrun runs the same recipe on every rank with
 identical configs. Rank 0 owns the engines and the collection thread; after
 collation it broadcasts the Batch (CPU tensors) to all ranks; every rank
-calls fit_batch on the identical full batch (DistTrainer slices rows
+calls fit_batch on the identical full batch (the trainer slices rows
 internally — the cross-rank denominator is free, ddp.md §1). Publishing is
 rank-0-LOCAL: DDP params are replicated, so rank 0's plain state_dict IS the
 full weights — followers never participate in publishes. The only
@@ -261,7 +261,7 @@ def _broadcast_batch(batch):
 
 def fit_async(
     engines: list,  # rank 0: one streaming engine per rollout GPU; followers: []
-    trainer: Trainer,  # Trainer (world=1) or DistTrainer (world>1, torchrun)
+    trainer: Trainer,  # the ONE Trainer; DDP engages if built under a process group
     reward_fn: Callable[[Trajectory], float],
     prompt_source: Callable[[int], list[Tensor]],
     sampling: SamplingParams,
@@ -273,6 +273,13 @@ def fit_async(
     """Run fully-async RL. Returns the per-iteration metrics history
     (rank 0; followers return []). See the module banner for the picture."""
     rank, world = _dist_ctx()
+    # Footgun guard: a Trainer built BEFORE init_process_group thinks world=1
+    # and would silently skip slicing/DDP — every rank would train the full
+    # batch identically (correct params, m x wasted compute, no loud failure).
+    assert getattr(trainer, "world", 1) == world, (
+        f"trainer.world={getattr(trainer, 'world', 1)} != dist world={world} — "
+        "construct the Trainer AFTER setup_distributed()"
+    )
     if rank > 0:
         return _follow(trainer, num_iterations)
 

@@ -46,7 +46,7 @@ Reported loss divides the scale back out (log the true value, not the trick).
 gradients accumulate locally and exactly ONE all-reduce fires per optimizer
 step — the standard DDP pattern, and the direct analog of FSDP2's
 `set_requires_gradient_sync(last)`. Forwards go through the DDP wrapper
-(its autograd hooks do the reduction); `DistTrainer.model` stays the RAW
+(its autograd hooks do the reduction); `Trainer.model` stays the RAW
 module, so state_dict names are clean and inherited no-grad code
 (compute_logprobs) skips the wrapper entirely.
 
@@ -71,7 +71,7 @@ asks (same rule as torch.compile).
 
 ## 6. Testing (the invariance standard, CPU-only, unchanged)
 
-tests/test_distributed.py, 2 gloo processes: 2-rank DistTrainer.fit_batch ==
+tests/test_distributed.py, 2 gloo processes: 2-rank Trainer.fit_batch ==
 single-process Trainer.fit_batch (identical parameters) for seq_mean /
 token_mean / int-C — pins denominator globalization, the loss-scale SUM
 identity, shuffle agreement, and no_sync accumulation at once. Plus the
@@ -81,3 +81,20 @@ controller-level 2-rank test (tests/test_fully_async.py) rides on top.
 Note for hand-rolled test models: the FSDP2 pytree trap (fsdp2.md §7) is
 GONE — DDP hooks parameters, not forward outputs, so output container type
 no longer matters.
+
+## 7. Merged into Trainer (2026-07-16)
+
+The DistTrainer subclass is gone: `train/trainer.py`'s ONE Trainer now reads
+the dist context at construction (world=1 when no process group exists) and
+its step() carries the three distributed lines directly — the rank slice,
+the world loss-scale, and the no_sync gate — every one a no-op at world=1.
+Rationale: the subclass duplicated the entire 40-line step() body to express
+three degenerate diffs; a fix in one had to be mirrored in the other, and the
+diffs were invisible without mentally diffing two files. `setup_distributed`
+moved into trainer.py; `full_state_dict` was deleted outright (replicated
+params make it `model.state_dict()` — the controller and tests inline that).
+Sections above that say "DistTrainer" describe today's Trainer at world>1.
+One footgun, guarded loudly in fit_async: the Trainer must be constructed
+AFTER setup_distributed(), else it reads world=1 and silently trains the
+full batch on every rank (correct parameters, m x wasted compute) — the
+controller asserts trainer.world == dist world.

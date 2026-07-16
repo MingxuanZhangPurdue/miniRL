@@ -423,9 +423,10 @@ readability than the one they teach. What each contributed survives:
   collection works regardless of sync/async, and StreamAdapter covers
   generate()-only engines. Its filters (reward_nonzero_std, GroupFilter,
   RewardFn) moved to rollout/filtering.py; CollectConfig lost the
-  round-only knob oversample_batch_size. The plain Trainer STAYS: DistTrainer
-  subclasses it (one trainer + a sharding override, not two trainers), and
-  world=1 (MPS/dev) must not pay dist init or DDP wrapping.
+  round-only knob oversample_batch_size. The plain Trainer STAYS — and as of
+  2026-07-16 it is the ONLY trainer: the DistTrainer subclass was merged into
+  it (docs/ddp.md §7); world=1 (MPS/dev) still pays no dist init or DDP
+  wrapping (the distributed lines are construction-time no-ops).
 
 ### Placement: how slime specifies GPUs, and our translation
 
@@ -464,10 +465,10 @@ degenerate case; on a box, give the engine its own GPU.
 The only collectives are the broadcast and DDP's gradient all-reduce inside
 fit_batch — both once per iteration on every rank, aligned by construction.
 (The FSDP2-era wiring also required followers to join every full_state_dict
-gather; that deadlock class retired with the shards.) world == 1 (plain
-Trainer, Mac path): no dist init, no broadcast, byte-for-byte the §10 loop.
-world > 1 requires DistTrainer (full-batch-identical semantics: docs/ddp.md
-§1) and B % world == 0.
+gather; that deadlock class retired with the shards.) world == 1 (Mac path):
+no dist init, no broadcast, byte-for-byte the §10 loop. There is ONE Trainer
+class for both (merged 2026-07-16, docs/ddp.md §7): construct it AFTER
+setup_distributed() and DDP engages automatically; B % world == 0 required.
 
 Async wants >= 2 devices to actually overlap (slime REQUIRES disjoint GPUs
 unless colocate); on one device the loop still runs correctly — generation
