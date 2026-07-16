@@ -23,9 +23,9 @@ glossary (symbols, shapes, the four policies, notes/ symbol mapping) is
   transformers, datasets, math-verify). Never create venvs.
 - Tests: `<that python> -m pytest tests/ -q` — keep it green; it is fast (~10s).
 - This machine is an Apple-silicon Mac: MPS + CPU only. NCCL weight sync /
-  placement are CUDA-box features. FSDP2 IS implemented and tested here
-  (2-process gloo/CPU equivalence — docs/fsdp2.md); its NCCL/bf16 fast path
-  is validated on the box later.
+  placement are CUDA-box features. The DDP learner IS implemented and tested here
+  (2-process gloo/CPU equivalence — docs/ddp.md; the FSDP2 learner it replaced
+  is retired, history in docs/fsdp2.md); NCCL is validated on the box later.
   vLLM RUNS LOCALLY via the vllm-metal plugin in the isolated venv
   `~/.venv-vllm-metal` (user-approved exception to the no-venv rule; repo dev
   stays on mingxuan) — spike findings + weight-update recipe:

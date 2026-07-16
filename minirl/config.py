@@ -21,7 +21,7 @@ class PlacementConfig:
     placement at all (this config unused).
     """
 
-    num_train_gpus: int = 1  # FSDP2 world size (1 = plain Trainer, no dist)
+    num_train_gpus: int = 1  # DDP world size (1 = plain Trainer, no dist)
     num_rollout_gpus: int = 1  # == number of DP engines (TP=1 each)
 
     @property

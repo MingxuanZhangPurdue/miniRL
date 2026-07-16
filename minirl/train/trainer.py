@@ -20,7 +20,7 @@ GROUNDED IN SLIME:
 
 Precision (docs/precision.md): this single-device trainer keeps the model in
 whatever dtype it was loaded (fp32 on MPS/CPU); bf16-compute-with-fp32-master
-arrives with the FSDP2 layer. The fp32 islands (logprobs, aggregation,
+stays a recipe-level autocast knob (docs/ddp.md §5). The fp32 islands (logprobs, aggregation,
 optimizer) hold regardless.
 """
 

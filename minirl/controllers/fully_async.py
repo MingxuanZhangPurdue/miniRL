@@ -47,14 +47,16 @@ BOUND: publish_interval + 1 — the +1 is a drained leftover consumed by the
 collection after the publish, one version older than its batchmates. TIS in
 the loss is what makes this bounded off-policyness mathematically fine.
 
-MULTI-RANK (docs/fsdp2.md §8, folded in here): torchrun runs the same recipe
-on every rank with identical configs. Rank 0 owns the engines and the
-collection thread; after collation it broadcasts the Batch (CPU tensors) to
-all ranks; every rank calls fit_batch on the identical full batch
-(DistTrainer slices rows internally — the cross-rank denominator is free,
-fsdp2.md §2); at publish iterations EVERY rank enters the full_state_dict
-gather (a collective), rank 0 keeps the result and loads the engines.
-Ranks > 0 run the small follower loop at the bottom of this file.
+MULTI-RANK (docs/ddp.md): torchrun runs the same recipe on every rank with
+identical configs. Rank 0 owns the engines and the collection thread; after
+collation it broadcasts the Batch (CPU tensors) to all ranks; every rank
+calls fit_batch on the identical full batch (DistTrainer slices rows
+internally — the cross-rank denominator is free, ddp.md §1). Publishing is
+rank-0-LOCAL: DDP params are replicated, so rank 0's plain state_dict IS the
+full weights — followers never participate in publishes. The only
+collectives are the broadcast and DDP's gradient all-reduce inside
+fit_batch, both exactly once per iteration on every rank, so the schedules
+align by construction. Ranks > 0 run the follower loop at the bottom.
 
 Async pays off with >= 2 devices (engines overlap training). On one device
 (the Mac) the loop is still correct — generation and training timeshare.
@@ -257,16 +259,6 @@ def _broadcast_batch(batch):
     return box[0]
 
 
-def _gather_state(trainer: Trainer, world: int) -> dict:
-    """Publishable plain fp32-CPU state dict. With world > 1 this is a gather
-    COLLECTIVE — every rank must call it at the same point (followers discard)."""
-    if world > 1:
-        from minirl.train.distributed import full_state_dict
-
-        return full_state_dict(trainer.model)
-    return {k: v.detach().cpu() for k, v in trainer.model.state_dict().items()}
-
-
 def fit_async(
     engines: list,  # rank 0: one streaming engine per rollout GPU; followers: []
     trainer: Trainer,  # Trainer (world=1) or DistTrainer (world>1, torchrun)
@@ -282,7 +274,7 @@ def fit_async(
     (rank 0; followers return []). See the module banner for the picture."""
     rank, world = _dist_ctx()
     if rank > 0:
-        return _follow(trainer, num_iterations, publish_interval)
+        return _follow(trainer, num_iterations)
 
     assert engines, "rank 0 needs at least one engine"
     assert len({e.pad_id for e in engines}) == 1, "engines disagree on pad_id"
@@ -315,11 +307,13 @@ def fit_async(
             in_flight.clear()
 
     def publish(version: int) -> None:
-        """Drain-then-publish, fleet edition. MAIN THREAD ONLY, after a join."""
+        """Drain-then-publish, fleet edition. MAIN THREAD ONLY, after a join.
+        Rank-0-local even under DDP: params are replicated, so this rank's
+        plain state_dict already IS the full weights (docs/ddp.md §4)."""
         assert not in_flight.is_set(), "publish during in-flight collection (join first)"
         for e in engines:  # ALL engines quiesce before ANY weight moves (single-version rule)
             e.drain()
-        state = _gather_state(trainer, world)  # collective when world > 1
+        state = {k: v.detach().cpu() for k, v in trainer.model.state_dict().items()}
         for e in engines:
             e.load_weights(state.items(), version)
 
@@ -376,19 +370,15 @@ def fit_async(
     return history
 
 
-def _follow(trainer: Trainer, num_iterations: int, publish_interval: int) -> list[dict]:
-    """Ranks > 0: no engines, no metrics — receive the batch, train, and show
-    up for every collective at the same schedule as rank 0 (same arithmetic
-    on the same configs; torchrun runs the same recipe everywhere)."""
-    from minirl.train.distributed import full_state_dict
-
-    # Rank 0's FIRST collective is the priming publish(version=0) gather,
-    # BEFORE any broadcast — miss this and both sides deadlock on mismatched
-    # collectives (found by the 2-rank test hanging, not by reading).
-    full_state_dict(trainer.model)
-    for it in range(1, num_iterations + 1):
+def _follow(trainer: Trainer, num_iterations: int) -> list[dict]:
+    """Ranks > 0: no engines, no metrics, no publishes — receive the batch,
+    train, repeat. Publishing never involves followers (DDP params are
+    replicated; rank 0's own state_dict is the full weights), so the only
+    collectives on any rank are the broadcast and DDP's gradient all-reduce
+    inside fit_batch — both once per iteration, aligned by construction.
+    (Under the retired FSDP2 wiring, followers also had to join every
+    full_state_dict gather; that whole deadlock class died with the shards.)"""
+    for _ in range(num_iterations):
         batch = _broadcast_batch(None)
         trainer.fit_batch(batch)
-        if it % publish_interval == 0:
-            full_state_dict(trainer.model)  # join the gather collective; rank 0 publishes
     return []

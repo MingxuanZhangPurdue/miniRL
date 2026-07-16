@@ -27,10 +27,12 @@ streaming contract; one poll == one round), losses grpo/gspo/cispo/sft as
 files + dapo/dr_grpo as named configs (`LOSSES` registry, algos/README.md),
 group advantages with pluggable `advantage_fn`, TIS, the three-mode reduce
 (`loss_agg`), `make_batch`, the generic `Trainer` (microbatch-exact,
-old-logprob recompute, NaN guard, AdamW-only), **the FSDP2 learner**
-(2026-07-13: `train/distributed.py` — shard_model + DistTrainer +
-full_state_dict; 2-rank gloo/CPU equivalence == single-process for all three
-loss_agg modes; NCCL/bf16 path awaits the box — docs/fsdp2.md), **wandb
+old-logprob recompute, NaN guard, AdamW-only), **the DDP learner**
+(2026-07-15: `train/distributed.py` — DistTrainer + full_state_dict, DDP
+replicated params, SUM-via-loss-scale, no_sync accumulation; 2-rank gloo/CPU
+equivalence == single-process for all three loss_agg modes; NCCL awaits the
+box — docs/ddp.md; REPLACED the 2026-07-13 FSDP2 learner, history in
+docs/fsdp2.md), **wandb
 metric logging** (`minirl/logging.py`; wandb lives ONLY in recipes; recipe 03
 wires it behind `--wandb`), rewards (GSM8K math verifier + level-2 code
 sandbox), the data layer (chat templating with assistant-mask, HF prompt
@@ -40,8 +42,9 @@ fully-async controller** (2026-07-14 consolidation, docs/async_tier2.md
 §10-§11: `controllers/fully_async.py` — fit_async + collect_groups_dp; k DP
 engines via shared dealer/tally with burst-capped deals, one owner thread
 per engine, drain-ALL-then-publish, staleness ≤ publish_interval + 1; 1..m
-trainer ranks — rank 0 collects + broadcasts, followers train + join publish
-gathers, 2-rank gloo test vs single-process; dynamic sampling filters in
+trainer ranks — rank 0 collects + broadcasts + publishes from its own
+replicated params, followers only train; 2-rank gloo test vs single-process;
+dynamic sampling filters in
 `rollout/filtering.py`; `PlacementConfig` + `VLLMEngine(gpu_id=...)` for the
 single-node GPU split, slime's layout). Retired the same day: round_based /
 streaming controllers, rollout/sampling + rollout/streaming collectors
@@ -131,7 +134,7 @@ Reference codebases and study resources:
    seeding, resumable checkpoints, NaN guards. These are exactly the details
    production frameworks get right and tutorials get wrong.
 7. **Single node, multi-GPU as the design target.** The reference setup is one
-   node with N GPUs (e.g. 4–8): learner on a DDP/FSDP2 process group, rollout
+   node with N GPUs (e.g. 4–8): learner on a DDP process group, rollout
    engines on their own GPUs, real NCCL weight sync between them — the actual
    topology slime/verl manage, minus multi-node. Everything must still degrade
    gracefully to 1 GPU (colocated mode) and to CPU/MPS for smoke tests, so the
@@ -176,9 +179,10 @@ miniRL/
 │   │   ├── fully_async.py       # [done] THE async loop: fit_async + collect_groups_dp —
 │   │   │                        #   k DP engines (shared dealer + tally, burst-capped
 │   │   │                        #   deals, one owner thread per engine), 1..m trainer
-│   │   │                        #   ranks (rank 0 collects + broadcasts; followers train
-│   │   │                        #   + join publish gathers), drain-ALL-then-publish
-│   │   │                        #   (docs/async_tier2.md §10-§11). round_based.py /
+│   │   │                        #   ranks (rank 0 collects + broadcasts + publishes
+│   │   │                        #   locally; followers only train — DDP replication),
+│   │   │                        #   drain-ALL-then-publish (docs/async_tier2.md
+│   │   │                        #   §10-§11, docs/ddp.md). round_based.py /
 │   │   │                        #   streaming.py / data_parallel.py retired 2026-07-14 —
 │   │   │                        #   both tiers were k=1 special cases of this file
 │   │   └── sync.py              # (planned) collect -> train -> publish, no overlap;
@@ -255,10 +259,11 @@ miniRL/
 │   │   │                        # optimizer: AdamW ONLY, constructed inside trainer.py —
 │   │   │                        #   no optim.py, no optimizer zoo (principle 8); a simple
 │   │   │                        #   warmup schedule may join trainer.py when recipes need it
-│   │   └── distributed.py       # [done] FSDP2 learner: shard_model + DistTrainer
-│   │                            #   (full-batch-global denom, sum-reduce, sync-on-last)
-│   │                            #   + full_state_dict publish; gloo/CPU-tested
-│   │                            #   (docs/fsdp2.md; NCCL/bf16 validated on the box)
+│   │   └── distributed.py       # [done] DDP learner: DistTrainer (full-batch-global
+│   │                            #   denom, SUM via loss-scale, no_sync accumulation)
+│   │                            #   + full_state_dict (local copy — replicated params);
+│   │                            #   gloo/CPU-tested (docs/ddp.md; NCCL on the box.
+│   │                            #   Replaced FSDP2 2026-07-15 — docs/fsdp2.md)
 │   │
 │   ├── rollout/                 # ≈ slime's data buffer + orchestration layer
 │   │   ├── types.py             # [done] SamplingParams, Trajectory, Batch (the data contract)
@@ -482,7 +487,7 @@ Built in two tiers, mirroring slime (full study + design: docs/async_training.md
 ```
 
 - **GPU placement** (`placement.py`): the reference topology on an N-GPU node
-  is *disaggregated* — e.g. with 4 GPUs, learner as a 3-rank FSDP2/DDP group on
+  is *disaggregated* — e.g. with 4 GPUs, learner as a 3-rank DDP group on
   GPUs 0–2, one rollout engine on GPU 3 (ratios configurable). *Colocated* mode
   (learner and engine share every GPU, alternating phases — verl's hybrid
   engine) is the 1-GPU fallback and an ablation axis: measure the throughput
@@ -495,11 +500,11 @@ Built in two tiers, mirroring slime (full study + design: docs/async_training.md
 - **Buffer**: bounded queue with a staleness policy — drop or down-weight
   trajectories older than `max_version_lag`.
 - **Weight sync** (`weight_sync.py`): per tensor, in HF naming — the learner
-  gathers each parameter to a full tensor (a DTensor `.full_tensor()` under
-  FSDP2), NCCL-broadcasts it over a learner+engines process group (the same
-  mechanism slime uses to push Megatron weights into SGLang), and `VLLMEngine`
-  feeds it into vLLM's `load_weights`, which maps HF-named tensors into vLLM's
-  internal fused layout. Gather-then-broadcast-then-remap is a miniature of
+  already holds every parameter in full (DDP replicates), NCCL-broadcasts it
+  over a learner+engines process group (the same mechanism slime uses to push
+  Megatron weights into SGLang), and `VLLMEngine` feeds it into vLLM's
+  `load_weights`, which maps HF-named tensors into vLLM's internal fused
+  layout. Broadcast-then-remap is a miniature of
   the resharding problem verl solves between FSDP and vLLM formats; because
   the learner is the HF module, no name translation is ever needed. Streaming
   per tensor (bucketed) avoids a full-model memory spike. Gotchas handled
@@ -614,7 +619,7 @@ real frameworks. This table is the contract; keep it updated as code lands.
 | Overall dataflow owner | `rollout/controller.py` — a plain `fit()` loop that calls generate → reward → advantage → update | `train.py` driver over Ray actors | **single-controller**: `RayPPOTrainer.fit()` driving worker groups |
 | Data protocol between stages | `rollout/types.py` (`Trajectory`, `Batch`) | `Sample` dataclass flowing through the buffer | `DataProto` (tensordict + meta) passed between workers |
 | Rollout backend | duck-typed engines: `VLLMEngine` (primary, CUDA) or `HFEngine` (reference, any device) | SGLang server(s) behind a router | vLLM/SGLang rollout workers inside `ActorRolloutRefWorker` |
-| Training backend | `train/trainer.py` (+ optional FSDP2 in `train/distributed.py`) | Megatron-LM actor | FSDP / Megatron actor workers |
+| Training backend | `train/trainer.py` (+ optional DDP in `train/distributed.py`) | Megatron-LM actor | FSDP / Megatron actor workers |
 | Actor / rollout placement | `rollout/placement.py`: **colocated vs disaggregated** GPU assignment on one node | **colocated vs disaggregated** modes on GPU groups | **hybrid engine**: actor & rollout share GPUs, offload/reload between phases |
 | Weight sync learner → sampler | `rollout/weight_sync.py`: versioned NCCL broadcast (shm fallback on CPU) | bucketed NCCL broadcast (disaggregated) or CUDA IPC (colocated) | `sync_model_weights` / resharding between FSDP and vLLM formats |
 | Data buffer | `rollout/buffer.py` (bounded queue + staleness filter) | Data Buffer module (also the custom-data/partial-rollout hook point) | replay/experience handling inside the trainer loop |
@@ -624,7 +629,7 @@ real frameworks. This table is the contract; keep it updated as code lands.
 | Algorithm zoo | `algos/*.py` one file per loss | PPO/GRPO variants via CLI flags | `ppo`, `grpo`, `dapo`, `rloo`, ... trainer configs |
 | Agentic / multi-turn | `envs/` + `multiturn.py` interaction loop | custom rollout function (`--rollout-function-path`) | agent loop / multi-turn rollout with tool calling |
 | Config system | dataclasses + YAML + dot-path CLI overrides | argparse mega-flags (Megatron style) | Hydra/OmegaConf YAML trees |
-| Parallelism ceiling | DDP/FSDP2 learner + N rollout engines, single node | 3D parallelism (TP/PP/DP) multi-node via Megatron | 3D parallelism via Megatron or FSDP, Ray multi-node |
+| Parallelism ceiling | DDP learner + N rollout engines, single node | 3D parallelism (TP/PP/DP) multi-node via Megatron | 3D parallelism via Megatron or FSDP, Ray multi-node |
 
 Reading this table bottom-up also tells you exactly what miniRL *chose not to
 build* (Ray orchestration, paged attention, resharding between training and
@@ -681,7 +686,7 @@ e.g. async landed before SFT, sync-controller and PPO rows are superseded.)
   a thin `model.generate` wrapper. If you later want to *learn* inference
   internals, writing a KV-cache sampler from scratch is a natural side quest,
   but it is not on this repo's critical path.
-- No 3D parallelism (TP/PP) / MoE / multi-node — a DDP/FSDP2 learner group plus
+- No 3D parallelism (TP/PP) / MoE / multi-node — a DDP learner group plus
   dedicated rollout GPUs on one node is the ceiling.
 - No training models past ~4B; the lab animal is a 0.6–1B base model.
 - No prompt-engineering products; rewards are verifiable or learned, not vibes.

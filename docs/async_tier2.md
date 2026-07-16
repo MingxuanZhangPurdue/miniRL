@@ -316,7 +316,7 @@ torch-MPS-allocator assert during engine teardown (harmless, post-run).
 ## 10. Data-parallel engines (IMPLEMENTED 2026-07-14 — controllers/data_parallel.py, CPU-tested; on-box validation pending)
 
 The scenario: one node, model fits on a single GPU, k GPUs reserved for
-rollouts (e.g. 8 GPUs = 4 rollout + 4 FSDP training). Layout decision first:
+rollouts (e.g. 8 GPUs = 4 rollout + 4 DDP training). Layout decision first:
 
     model fits one GPU?   yes -> DP: k engines x TP=1, one owner thread each
                           no  -> TP: 1 engine, tensor_parallel_size = smallest
@@ -425,7 +425,7 @@ readability than the one they teach. What each contributed survives:
   RewardFn) moved to rollout/filtering.py; CollectConfig lost the
   round-only knob oversample_batch_size. The plain Trainer STAYS: DistTrainer
   subclasses it (one trainer + a sharding override, not two trainers), and
-  world=1 (MPS/dev) must not pay dist init or FSDP2 wrapping.
+  world=1 (MPS/dev) must not pay dist init or DDP wrapping.
 
 ### Placement: how slime specifies GPUs, and our translation
 
@@ -449,22 +449,25 @@ if the spike disproves inheritance: one OS process per engine (§10(c)).
 No colocate mode: on the Mac, MPS timeshare with no machinery IS the
 degenerate case; on a box, give the engine its own GPU.
 
-### One controller, 1..m trainer ranks (folds in fsdp2.md §8)
+### One controller, 1..m trainer ranks (docs/ddp.md; DDP since 2026-07-15)
 
 `fit_async(engines, trainer, ...)` is called identically on every rank
 (torchrun runs the same recipe; configs must agree across ranks):
 
     rank 0     owns the engines + collection thread exactly as §10; after
                make_batch, broadcast_object_list ships the Batch (CPU tensors)
-               to all ranks; publishes via full_state_dict() at intervals.
-    rank > 0   a small follower loop: receive batch -> fit_batch -> at
-               publish iterations, participate in the full_state_dict gather
-               (a collective: every rank must call it) and discard the result.
-               Followers pass engines=[].
+               to all ranks; publishes from its OWN state_dict at intervals
+               (DDP params are replicated — no gather, no collective).
+    rank > 0   the follower loop: receive batch -> fit_batch, repeat.
+               Followers pass engines=[] and never touch publishes.
 
-world == 1 (plain Trainer, Mac path): no dist init, no broadcast, byte-for-
-byte the §10 loop. world > 1 requires DistTrainer (full-batch-identical
-semantics: docs/fsdp2.md §2) and B % world == 0.
+The only collectives are the broadcast and DDP's gradient all-reduce inside
+fit_batch — both once per iteration on every rank, aligned by construction.
+(The FSDP2-era wiring also required followers to join every full_state_dict
+gather; that deadlock class retired with the shards.) world == 1 (plain
+Trainer, Mac path): no dist init, no broadcast, byte-for-byte the §10 loop.
+world > 1 requires DistTrainer (full-batch-identical semantics: docs/ddp.md
+§1) and B % world == 0.
 
 Async wants >= 2 devices to actually overlap (slime REQUIRES disjoint GPUs
 unless colocate); on one device the loop still runs correctly — generation

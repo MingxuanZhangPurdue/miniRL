@@ -1,5 +1,18 @@
 # FSDP2 learner: data-parallel training design
 
+**RETIRED 2026-07-15, REPLACED BY DDP (docs/ddp.md).** Decision: the repo's
+scope is models that train on ONE GPU (single node, DP only), so replicated
+parameters suffice and the DDP trainer is cleaner — no DTensor state-dict
+gathers, no PREMUL_SUM backend split, no publish-side collectives (followers
+no longer join gathers). What carries over unchanged: §2's cross-rank
+denominator law and the SUM-gradient semantics (now always via the
+loss-scale identity), the sync-on-last accumulation shape (DDP no_sync), and
+the equivalence-test standard. §7's empirical findings (the pytree trap, the
+PREMUL_SUM/gloo crash) are FSDP2-specific — kept below as history; the
+pytree trap does not apply to DDP (it hooks parameters, not outputs).
+
+Original design note follows (historical).
+
 Status: design + implementation together (2026-07-13). Pure PyTorch
 (`torch.distributed.fsdp.fully_shard`, the DTensor rewrite — in core torch,
 no external dependency; principle 1 holds). The MATH is validated on this

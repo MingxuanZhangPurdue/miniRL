@@ -1,15 +1,17 @@
-"""FSDP2 equivalence tests (docs/fsdp2.md §6) — 2 CPU processes over gloo.
+"""DDP equivalence tests (docs/ddp.md §6) — 2 CPU processes over gloo.
 
-The invariance standard, same as microbatching and packing: DISTRIBUTED AND
+The invariance standard, same as microbatching: DISTRIBUTED AND
 SINGLE-PROCESS MUST PRODUCE THE SAME MATH ON IDENTICAL DATA. One spawn runs
 all three loss_agg modes (amortizes process startup); the parent computes the
 single-process references and compares parameters.
+
+(The FSDP2-era pytree trap does not apply here: DDP hooks PARAMETERS, not
+forward outputs, so a SimpleNamespace-returning test model is fine.)
 """
 
 import os
-from typing import NamedTuple
+from types import SimpleNamespace
 
-import pytest
 import torch
 import torch.distributed as tdist
 import torch.multiprocessing as mp
@@ -25,16 +27,6 @@ WORLD = 2
 LOSS_AGGS = ["seq_mean", "token_mean", 10]
 
 
-class TinyOut(NamedTuple):
-    # NamedTuple, NOT SimpleNamespace: FSDP2 attaches its post-backward hook
-    # (reshard + grad hand-off to the sharded DTensors) to the forward's
-    # OUTPUT tensors, found via pytree traversal. SimpleNamespace is invisible
-    # to pytree -> the hook never attaches -> gradients silently never reach
-    # the optimizer's params (training no-ops). Real HF ModelOutput is
-    # pytree-registered, so only hand-rolled test models can hit this trap.
-    logits: torch.Tensor
-
-
 class TinyLM(nn.Module):
     def __init__(self, vocab: int = VOCAB, d: int = 16):
         super().__init__()
@@ -42,7 +34,7 @@ class TinyLM(nn.Module):
         self.head = nn.Linear(d, vocab)
 
     def forward(self, input_ids, attention_mask=None):
-        return TinyOut(logits=self.head(self.emb(input_ids)))  # (B, T, V)
+        return SimpleNamespace(logits=self.head(self.emb(input_ids)))  # (B, T, V)
 
 
 def make_trajs(b: int = 4, group_size: int = 2) -> list[Trajectory]:
@@ -84,20 +76,17 @@ def _worker(rank: int, port: int, out_dir: str) -> None:
     )
     tdist.init_process_group("gloo", rank=rank, world_size=WORLD)
     try:
-        from torch.distributed.device_mesh import init_device_mesh
-
-        from minirl.train.distributed import DistTrainer, full_state_dict, shard_model
+        from minirl.train.distributed import DistTrainer, full_state_dict
 
         results: dict = {}
         for loss_agg in LOSS_AGGS:
             torch.manual_seed(42)  # SAME init as the single-process reference
-            model = shard_model(TinyLM(), mesh=init_device_mesh("cpu", (WORLD,)))
             trainer = DistTrainer(
-                model,
+                TinyLM(),
                 grpo_loss,
                 GRPOConfig(loss_agg=loss_agg),
                 # micro_batch_size=1: each rank runs 2 microbatches -> exercises
-                # local accumulation with sync-on-last (docs/fsdp2.md §3)
+                # no_sync local accumulation with all-reduce-on-last (docs/ddp.md §3)
                 TrainConfig(lr=1e-2, minibatch_size=8, micro_batch_size=1),
             )
             trainer.fit_batch(make_batch(make_trajs(), pad_id=0)[0])
@@ -117,7 +106,7 @@ def _worker(rank: int, port: int, out_dir: str) -> None:
         tdist.destroy_process_group()
 
 
-def test_two_rank_fsdp2_matches_single_process(tmp_path):
+def test_two_rank_ddp_matches_single_process(tmp_path):
     port = 29511  # fixed local port; gloo binds 127.0.0.1
     mp.spawn(_worker, args=(port, str(tmp_path)), nprocs=WORLD, join=True)
     results = torch.load(tmp_path / "dist_results.pt")
@@ -128,7 +117,7 @@ def test_two_rank_fsdp2_matches_single_process(tmp_path):
         assert set(dist_sd) == set(ref)  # full_state_dict round-trips every param name
         for k in ref:
             assert torch.allclose(dist_sd[k], ref[k], atol=1e-6), (
-                f"loss_agg={loss_agg}: parameter {k} diverged between 2-rank FSDP2 "
+                f"loss_agg={loss_agg}: parameter {k} diverged between 2-rank DDP "
                 "and single-process training"
             )
-    assert results["ragged_asserted"], "B % world != 0 must fail loud (docs/fsdp2.md §3)"
+    assert results["ragged_asserted"], "B % world != 0 must fail loud (docs/ddp.md §1)"

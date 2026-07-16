@@ -11,7 +11,7 @@ against a single-process reference.
 
 import os
 import time
-from typing import NamedTuple
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -31,21 +31,16 @@ SAMPLING = SamplingParams(max_new_tokens=5, n=2)
 FILTER_CFG = CollectConfig(group_size=2, target_groups=3, strategy="filter")
 
 
-class TinyOut(NamedTuple):
-    # NamedTuple, NOT SimpleNamespace: this TinyLM gets FSDP2-sharded in the
-    # 2-rank test, and FSDP2 finds forward outputs via pytree — the
-    # SimpleNamespace trap silently no-ops training (docs/fsdp2.md §7).
-    logits: torch.Tensor
-
-
 class TinyLM(nn.Module):
+    # SimpleNamespace output is fine under DDP (it hooks parameters, not
+    # forward outputs — the FSDP2 pytree trap retired with FSDP2).
     def __init__(self, vocab: int = VOCAB, d: int = 16):
         super().__init__()
         self.emb = nn.Embedding(vocab, d)
         self.head = nn.Linear(d, vocab)
 
     def forward(self, input_ids, attention_mask=None):
-        return TinyOut(logits=self.head(self.emb(input_ids)))  # (B, T, V)
+        return SimpleNamespace(logits=self.head(self.emb(input_ids)))  # (B, T, V)
 
 
 class FakeStreamEngine:
@@ -428,15 +423,12 @@ def _dist_worker(rank: int, port: int, out_dir: str) -> None:
     )
     tdist.init_process_group("gloo", rank=rank, world_size=WORLD)
     try:
-        from torch.distributed.device_mesh import init_device_mesh
-
-        from minirl.train.distributed import DistTrainer, full_state_dict, shard_model
+        from minirl.train.distributed import DistTrainer, full_state_dict
 
         def ctor():
             torch.manual_seed(42)
-            model = shard_model(TinyLM(), mesh=init_device_mesh("cpu", (WORLD,)))
             return DistTrainer(
-                model, grpo_loss, GRPOConfig(),
+                TinyLM(), grpo_loss, GRPOConfig(),
                 TrainConfig(lr=1e-2, minibatch_size=4, micro_batch_size=2),
             )
 
@@ -447,15 +439,14 @@ def _dist_worker(rank: int, port: int, out_dir: str) -> None:
                 {
                     "final": full_state_dict(trainer.model),
                     "published": engine.published,
-                    "grad_norm": history[0]["grad_norm"],  # global (DTensor .full_tensor())
+                    "grad_norm": history[0]["grad_norm"],  # post-all-reduce: global by DDP's contract
                     "iters": len(history),
                 },
                 os.path.join(out_dir, "rank0.pt"),
             )
         else:
             trainer, history = _run_training(ctor, [], num_iterations=2)  # follower: engines=[]
-            assert history == []
-            full_state_dict(trainer.model)  # rank 0 gathers after its run; stay aligned
+            assert history == []  # followers: no metrics, no publishes (docs/ddp.md §4)
         tdist.barrier()
     finally:
         tdist.destroy_process_group()

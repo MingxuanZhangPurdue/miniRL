@@ -22,11 +22,11 @@ correctness invariants** so no config combination can silently break training.
 | Component | dtype | Where specified |
 |---|---|---|
 | Rollout engine compute (vLLM / HFEngine) | **bf16** CUDA, **fp32** MPS/CPU | knob 1: `HFEngine(dtype=...)` / `VLLMEngine(dtype=...)`; auto-picked per device (engine/hf_engine.py already does this) |
-| Learner forward/backward (weights-as-computed, activations, local grads) | **bf16** CUDA, **fp32** MPS/CPU | knob 2: `train.compute_dtype` (trainer, upcoming): FSDP2 `MixedPrecisionPolicy(param_dtype=compute_dtype)`; single-device path = fp32 weights + `torch.autocast` |
+| Learner forward/backward (weights-as-computed, activations, local grads) | **bf16** CUDA, **fp32** MPS/CPU | knob 2: recipe-level `torch.autocast` on the CUDA box (docs/ddp.md §5 — measured before built); dev path = fp32 weights end to end |
 | Checkpoints at rest (`save_pretrained`) | **bf16** (HF convention) | knob 3: `train.checkpoint_dtype` |
 | Master weights (what the optimizer updates) | **fp32**, always | hardcoded. bf16 has ~0.4% relative resolution: a `lr·grad ~ 1e-6` update rounds to zero (`1 + 1e-6 == 1` in bf16) and learning silently stops |
 | Optimizer states (Adam m, v) | **fp32**, always | hardcoded, same reason |
-| Gradient reduction / accumulation | **fp32**, always | hardcoded: FSDP2 `reduce_dtype=fp32`; grad-accum sums many small microbatch contributions |
+| Gradient reduction / accumulation | **fp32**, always | DDP all-reduces fp32 grads (model dtype is fp32 on the dev path); grad-accum sums many small microbatch contributions |
 | Logits → logprobs (`gather_logprobs`) | **fp32 upcast before log_softmax**, always | hardcoded in the trainer helper; tested |
 | `Trajectory.logprobs` / `Batch.*_logprobs` | **fp32** storage | data contract (rollout/types.py) |
 | Ratio / KL / TIS math in losses | **fp32** (inputs already fp32 by the two rows above) | contract; KL log-diff additionally clamped to ±20 (algos/grpo.py) |
