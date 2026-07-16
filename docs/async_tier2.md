@@ -31,9 +31,11 @@ Tier-2 is additive; deleting its three files restores today's repo.
 ## 1. The three new files and how they connect (as built)
 
     minirl/engine/vllm_engine.py      VLLMEngine: submit/poll/stash/drain +
-                                      tier-1 generate() + load_weights
+                                      load_weights (generate() removed 2026-07-16)
     minirl/rollout/streaming.py       collect_groups_stream (drives poll())
-    minirl/controllers/streaming.py       fit_async_stream (tier-1's pipeline shape)
+                                      [RETIRED into controllers/fully_async.py, §11]
+    minirl/controllers/streaming.py   fit_async_stream (tier-1's pipeline shape)
+                                      [RETIRED into controllers/fully_async.py, §11]
 
     worker thread:  collect_groups_stream ── submit(prompt, params, meta) ──┐
                       │  poll() -> finished groups; filter; top_up;         │ VLLMEngine
@@ -50,15 +52,14 @@ Tier-2 is additive; deleting its three files restores today's repo.
 
 ## 2. minirl/engine/vllm_engine.py
 
-One class, two operating modes, so it serves BOTH tiers (as built):
+One class, one interface (as built; the blocking tier-1 `generate()` mode it
+originally also carried was REMOVED 2026-07-16 — unused since the
+round-based controller retired, §11; generate()-style engines enter via
+engine/stream_adapter.py):
 
-- **Tier-1 mode** — satisfies today's duck-type exactly, no threads:
-  `generate(prompt_ids, params)` submits everything and polls until all
-  requests finish, returning trajectories grouped in submission order.
-  `fit_async` works with vLLM unchanged, day one.
-- **Tier-2 mode** — four small primitives the collector drives directly
+- **Streaming mode** — four small primitives the collector drives directly
   (no thread of its own; the collector runs on the controller's worker
-  thread, same as tier-1's rollout):
+  thread):
 
   ```python
   submit(prompt_ids, params, meta) -> rid   # add_request with n=G, meta rides along
@@ -234,7 +235,7 @@ Real-engine validation, next in line (runs from `~/.venv-vllm-metal` with
 the repo on PYTHONPATH; NOT under pytest/mingxuan — vLLM is not installed
 there, by design):
 
-4. vllm-metal smoke: `VLLMEngine.generate` on Qwen3-0.6B (tier-1 duck-type
+4. vllm-metal smoke: `VLLMEngine` submit/poll on Qwen3-0.6B (streaming contract
    parity vs HFEngine: grouped order, loss_mask, logprobs present);
    **EOS-parity check** — HFEngine's responses INCLUDE the eos token; verify
    vLLM's token_ids do too, else fix in `_to_group`; the **weight-update

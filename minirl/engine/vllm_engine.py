@@ -6,11 +6,12 @@ needs: finished GROUPS come back incrementally (poll) while vLLM's scheduler
 keeps every slot busy (continuous batching is vLLM's core design — we
 implement none of it, we only keep it fed).
 
-Two operating modes, one class:
-  tier 1: generate(prompt_ids, params) — submit everything, poll until done.
-    Satisfies the HFEngine duck-type exactly; drop-in for fit_async.
-  tier 2: submit() / poll() / drain() — the streaming interface consumed by
-    controllers/fully_async.py (collect_groups_dp drives poll() directly).
+One interface: the streaming contract — submit() / poll() / stash() /
+drain() / n_inflight / load_weights / pad_id — consumed by
+controllers/fully_async.py (collect_groups_dp drives poll() directly).
+(A blocking tier-1 generate() existed until 2026-07-16; it retired with the
+round-based controller — generate()-style engines now enter via
+engine/stream_adapter.py instead.)
 
 IN-FLIGHT UPDATES ARE DEFERRED (decision 2026-07-10, docs/async_tier2.md §4):
 load_weights REQUIRES a quiescent engine (drain-then-publish, asserted), so
@@ -157,19 +158,6 @@ class VLLMEngine:
             for group in self.poll():
                 self.stash(group)
 
-    # ---------------- tier-1 duck-type (fit_async drop-in) ----------------
-
-    @torch.no_grad()
-    def generate(self, prompt_ids: list[Tensor], params: SamplingParams) -> list[Trajectory]:
-        """Blocking batch generation, grouped by prompt in submission order."""
-        assert not self._pending and not self._stash, "generate() on a busy engine (streaming in progress)"
-        order = [self.submit(p, params) for p in prompt_ids]
-        done: dict[str, list[Trajectory]] = {}
-        while self._pending:
-            for group in self.poll():
-                done[group[0].meta["_request_id"]] = group
-        return [t for rid in order for t in done[rid]]
-
     # ---------------- weight updates (drain-then-publish ONLY) ----------------
 
     def load_weights(self, named_tensors, version: int) -> None:
@@ -215,7 +203,7 @@ class VLLMEngine:
                     ),
                     logprobs=torch.cat([torch.zeros(n_p), lps]),
                     version=req["version"],
-                    meta=dict(req["meta"], _request_id=req_out.request_id),
+                    meta=dict(req["meta"]),
                 )
             )
         return group

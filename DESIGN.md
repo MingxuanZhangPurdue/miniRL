@@ -201,8 +201,8 @@ miniRL/
 │   │   │                        #   submit/poll/stash/drain/n_inflight + load_weights
 │   │   │                        #   + pad_id; sampling side on rollout/types.SamplingParams
 │   │   ├── vllm_engine.py       # [done] PRIMARY backend: low-level LLMEngine step loop
-│   │   │                        #   (continuous batching); generate() + streaming
-│   │   │                        #   interface; gpu_id pinning for DP placement (§11);
+│   │   │                        #   (continuous batching); the streaming interface
+│   │   │                        #   only; gpu_id pinning for DP placement (§11);
 │   │   │                        #   weight updates via callable RPC + safetensors path
 │   │   │                        #   (Metal recipe validated, CUDA branch awaits box;
 │   │   │                        #   docs/async_tier2.md §8); Mac: vllm-metal venv
