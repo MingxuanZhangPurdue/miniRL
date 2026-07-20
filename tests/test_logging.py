@@ -27,7 +27,7 @@ def test_namespacing_and_derived_metrics():
     out = namespace_metrics(CONTROLLER_DICT)
     assert out["rollout/reward_mean"] == 0.5 and out["train/loss"] == -0.02
     assert out["time/t_generate"] == 4.0 and out["async/staleness"] == 1
-    assert out["time/tokens_per_sec"] == 800 / 4.0  # derived (docs/fast_rl.md)
+    assert out["time/tokens_per_sec"] == 800 / 4.0  # derived
     assert out["rollout/drop_rate"] == 2 / 10  # derived saturation signal
     assert out["brand_new_metric"] == 42.0  # unknown keys pass through BARE
     assert "iteration" not in out  # it is the step, not a metric

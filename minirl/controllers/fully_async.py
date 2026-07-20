@@ -1,5 +1,4 @@
-"""THE fully-async training loop: k DP engines x 1..m trainer ranks
-(docs/async_tier2.md §10 collection, §11 consolidation + placement).
+"""THE fully-async training loop: k DP engines x 1..m trainer ranks.
 
 One controller serves every async configuration on a single node:
 
@@ -47,7 +46,7 @@ BOUND: publish_interval + 1 — the +1 is a drained leftover consumed by the
 collection after the publish, one version older than its batchmates. TIS in
 the loss is what makes this bounded off-policyness mathematically fine.
 
-MULTI-RANK (docs/ddp.md): torchrun runs the same recipe on every rank with
+MULTI-RANK: torchrun runs the same recipe on every rank with
 identical configs. Rank 0 owns the engines and the collection thread; after
 collation it broadcasts the Batch (CPU tensors) to all ranks; every rank
 calls fit_batch on the identical full batch (the trainer slices rows
@@ -316,7 +315,7 @@ def fit_async(
     def publish(version: int) -> None:
         """Drain-then-publish, fleet edition. MAIN THREAD ONLY, after a join.
         Rank-0-local even under DDP: params are replicated, so this rank's
-        plain state_dict already IS the full weights (docs/ddp.md §4)."""
+        plain state_dict already IS the full weights."""
         assert not in_flight.is_set(), "publish during in-flight collection (join first)"
         for e in engines:  # ALL engines quiesce before ANY weight moves (single-version rule)
             e.drain()

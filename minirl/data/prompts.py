@@ -13,7 +13,7 @@ from minirl.data.chat import Message, encode_prompt
 
 # row_fn adapts ONE dataset row to (chat messages, meta dict). Meta rides with
 # every trajectory to the reward fn (e.g. {"answer": "42"}). One tiny function
-# per dataset — not a column-mapping config schema (DESIGN principle 8).
+# per dataset — not a column-mapping config schema.
 RowFn = Callable[[dict], tuple[list[Message], dict]]
 
 

@@ -35,7 +35,7 @@ def sft_batches(
     """Yield shuffled Batches for one epoch over an HF conversations dataset.
 
     Over-long conversations are skipped (logged count is the caller's concern);
-    packing (DESIGN §6) will later replace this length filter.
+    packing will later replace this length filter.
     """
     order = list(range(len(dataset)))
     random.Random(seed).shuffle(order)

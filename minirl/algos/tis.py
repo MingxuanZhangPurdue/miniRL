@@ -11,7 +11,7 @@ THE TWO-GAP PICTURE — three copies of "the same" policy touch each batch:
          └─────────────── TIS (this file):  w_t = clamp(exp(old - behavior), lo, hi) ────────────────┘└──── PPO clip (in the losses) ────┘
 
 Rollout tokens were sampled from the inference engine's numerics (vLLM
-kernels, bf16 — DESIGN §6.0; we measured the gap), and under async training
+kernels, bf16 — we measured the gap), and under async training
 also from an older weight version. The unbiased fix is the per-token weight
 
     w_t = pi_old(y_t) / pi_engine(y_t) = exp(logpi_old - logpi_engine)

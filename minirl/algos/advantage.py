@@ -79,7 +79,7 @@ def degenerate_group_mask(rewards: Tensor, group_ids: Tensor, atol: float = 1e-6
     Same criterion as slime's `check_reward_nonzero_std` dynamic-sampling
     filter and DAPO's dynamic sampling (its one non-config change). Used to filter
     at collection time (rollout/filtering.py + the collector, the preferred fix) or to report
-    `frac_degenerate_groups` — a key GRPO health metric (docs/sync_training.md §4).
+    `frac_degenerate_groups` — a key GRPO health metric.
     """
     _, std, _ = _group_stats(rewards, group_ids)
     return std <= atol  # (B,)

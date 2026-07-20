@@ -1,6 +1,6 @@
 """StreamAdapter — gives a generate()-only engine the streaming interface.
 
-The two-controller consolidation (docs/async_tier2.md §11) left ONE training
+The two-controller consolidation left ONE training
 loop, and it speaks the streaming contract (submit/poll/stash/drain/
 n_inflight/load_weights/pad_id). HFEngine speaks the old two-method contract
 (generate/load_weights). This adapter bridges them WITHOUT touching HFEngine:
@@ -17,7 +17,7 @@ not a controller file.
 
 What this costs vs a real streaming engine (why VLLMEngine exists): no
 incremental finishers (the batch's slowest member gates everything — the
-"two waits" of docs/fast_rl.md §1) and refills only land between rounds.
+classic "two waits") and refills only land between rounds.
 Correctness is identical; throughput is what you give up.
 """
 

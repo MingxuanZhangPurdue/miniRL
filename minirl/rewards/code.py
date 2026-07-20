@@ -1,4 +1,4 @@
-"""Code-execution reward with a level-2 sandbox (DESIGN: rewards/).
+"""Code-execution reward with a level-2 sandbox.
 
 The reward is simple: extract the model's ```python fence, append the task's
 test asserts, run it; reward 1.0 iff the process exits cleanly.

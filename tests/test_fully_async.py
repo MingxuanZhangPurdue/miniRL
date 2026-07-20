@@ -1,11 +1,11 @@
 """fully_async controller tests — CPU only, no vLLM, no GPUs.
 
-Consolidates the retired test_streaming.py + test_data_parallel.py suites
-(docs/async_tier2.md §11): a FakeStreamEngine (deterministic, poll-driven,
+Consolidates the retired test_streaming.py + test_data_parallel.py
+suites: a FakeStreamEngine (deterministic, poll-driven,
 version-stamping, drain-before-publish ASSERTED) and a FakeGenEngine (the
 HFEngine duck-type, fed through StreamAdapter) exercise collect_groups_dp
 and fit_async end to end with the real trainer/batching/loss code. The
-2-process gloo test pins the rank-0/follower wiring (docs/fsdp2.md §8)
+2-process gloo test pins the rank-0/follower wiring
 against a single-process reference.
 """
 
@@ -445,7 +445,7 @@ def _dist_worker(rank: int, port: int, out_dir: str) -> None:
             )
         else:
             trainer, history = _run_training(ctor, [], num_iterations=2)  # follower: engines=[]
-            assert history == []  # followers: no metrics, no publishes (docs/ddp.md §4)
+            assert history == []  # followers: no metrics, no publishes
         tdist.barrier()
     finally:
         tdist.destroy_process_group()
@@ -517,4 +517,4 @@ def test_vllm_engine_module_imports_without_vllm():
     # all vLLM imports are method-local: the module must import in this env
     import minirl.engine.vllm_engine as m
 
-    assert hasattr(m, "VLLMEngine") and hasattr(m, "_apply_weights_from_file")
+    assert hasattr(m, "VLLMEngine") and hasattr(m, "_metal_apply_weights_from_file")

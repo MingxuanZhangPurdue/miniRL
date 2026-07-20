@@ -1,7 +1,7 @@
 """Trajectories -> padded Batch, and Batch -> mini/micro slices.
 
-The collation layer between rollout land and training land
-(docs/sync_training.md §3). RIGHT-padding here (training has no generation
+The collation layer between rollout land and training land.
+RIGHT-padding here (training has no generation
 constraint) vs the engine's LEFT-padding (prompts must touch the first
 generated token) — the classic pair of conventions worth one comment each.
 """
@@ -16,7 +16,7 @@ from minirl.rollout.types import Batch, Trajectory
 
 # Per-ROW advantage estimator: (rewards (B,), group_ids (B,)) -> (B,) scalars,
 # broadcast onto response tokens by make_batch. ≈ slime's advantage_estimator
-# dispatch, as a plain callable (DESIGN principle 8 corollary: no path plugins).
+# dispatch, as a plain callable (no string-path plugins).
 #
 # SCOPE, deliberately: this signature covers the critic-free SCALAR family
 # (GRPO/Dr.GRPO, RLOO, global-batch baselines, rank-in-group, ...). PER-TOKEN
@@ -44,7 +44,7 @@ def make_batch(
     rows without one become singleton groups (advantage 0 under GRPO).
 
     Returns (batch, stats) where stats carries collation health metrics
-    (frac_degenerate_groups is the key GRPO signal — docs/sync_training.md §4).
+    (frac_degenerate_groups is the key GRPO signal).
     """
     b = len(trajs)
     # = this batch's T (padded prompt+completion length); NOT the engine's
@@ -76,7 +76,7 @@ def make_batch(
         "max_len": t_max,
         "response_tokens": int(loss_mask.sum()),
         # fraction of the (B, T) rectangle that is pad — the metric that will
-        # one day justify pack_batch (DESIGN §6, sequence packing)
+        # one day justify pack_batch (sequence packing)
         "frac_padding": 1.0 - attention_mask.float().mean().item(),
         "reward_mean": rewards.mean().item(),
         "reward_std": rewards.std().item() if b > 1 else 0.0,

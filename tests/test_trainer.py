@@ -1,6 +1,6 @@
 """Trainer + batching tests on a tiny random LM (CPU, seconds).
 
-Covers the invariants from docs/sync_training.md §9 that don't need a real
+Covers the trainer invariants that don't need a real
 model: gather_logprobs correctness, batch round-trip, microbatch gradient
 equivalence, old_logprobs recompute, on-policy ratio == 1, NaN guard, and
 "SFT actually learns".
@@ -230,11 +230,3 @@ def test_bf16_weights_preserves_sub_ulp_updates():
         trainer.fit_batch(make_batch(make_trajs(), pad_id=0)[0])
     moved = sum((m - m0).abs().sum().item() for m, m0 in zip(trainer._masters, masters0))
     assert moved > 0, "fp32 masters must accumulate updates far below bf16 ulp"
-
-
-def test_bf16_and_bf16_weights_are_mutually_exclusive():
-    with pytest.raises(AssertionError, match="pick one"):
-        Trainer(
-            TinyLM(), grpo_loss, GRPOConfig(),
-            TrainConfig(bf16=True, bf16_weights=True),
-        )

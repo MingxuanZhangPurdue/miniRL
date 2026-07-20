@@ -18,7 +18,7 @@ class SamplingParams:
     Engines are duck-typed — no base class. An engine is any object with:
       generate(prompt_ids: list[(T_i,) int64], params: SamplingParams) -> list[Trajectory]
           returning B*n trajectories grouped by prompt [p0_s0.. p0_s{n-1}, p1_s0, ..],
-          each carrying RAW-model behavior logprobs (DESIGN §6.0) and the
+          each carrying RAW-model behavior logprobs and the
           engine's current weight version;
       load_weights(named_tensors: iterable[(str, Tensor)], version: int) -> None.
     HFEngine (engine/hf_engine.py) is the reference; VLLMEngine (CUDA) matches it.

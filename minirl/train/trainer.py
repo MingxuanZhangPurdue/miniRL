@@ -1,15 +1,15 @@
 """The generic step engine: ONE trainer for SFT and every RL loss, on one GPU
-or many (world=1 is the degenerate case of the DDP loop — docs/ddp.md).
+or many (world=1 is the degenerate case of the DDP loop).
 
-Owns exactly the algorithm-agnostic parts (docs/sync_training.md §5):
+Owns exactly the algorithm-agnostic parts:
 forward -> gather_logprobs -> loss_map -> ONE global aggregation -> backward,
 with microbatch gradient accumulation, grad clipping, AdamW, NaN guard, and
-the tier-1 rule from docs/async_training.md §2: old_logprobs are recomputed
+the tier-1 rule: old_logprobs are recomputed
 UNCONDITIONALLY at the start of every update phase (correct for ppo_epochs>1
 in sync, mandatory under async staleness; slime's use_rollout_logprobs=False
 default path).
 
-DISTRIBUTED (docs/ddp.md, esp. §7): if torch.distributed is initialized at
+DISTRIBUTED: if torch.distributed is initialized at
 construction, the model is DDP-wrapped and step() becomes data-parallel —
 every rank holds the IDENTICAL full minibatch, computes the GLOBAL
 denominator from its full mask, then trains only rows[rank::world];
@@ -28,10 +28,11 @@ GROUNDED IN SLIME:
   - fp32 logit upcast inside gather_logprobs == slime's
     `vocab_parallel_logits.float()` (ppo_utils.py:199).
 
-Precision (docs/precision.md): the model trains in whatever dtype it was
-loaded (fp32 on MPS/CPU); bf16 on the CUDA box is a recipe-level autocast
-knob, measured before built (docs/ddp.md §5). The fp32 islands (logprobs,
-aggregation, optimizer) hold regardless.
+Precision: the model trains in whatever dtype it was
+loaded (fp32 on MPS/CPU); the one bf16 mode is cfg.bf16_weights — Megatron
+style, bf16 params + fp32 masters (an autocast variant existed until
+2026-07-19; removed — slime/Megatron ship exactly one mode and so do we).
+The fp32 islands (logprobs, aggregation, optimizer) hold regardless.
 """
 
 import os
@@ -72,7 +73,7 @@ def gather_logprobs(logits: Tensor, input_ids: Tensor) -> Tensor:
         position 0 has no prediction and is set to 0.0 (always loss-masked).
 
     logits[:, t] predicts token t+1, hence the shift-then-left-pad. The fp32
-    upcast BEFORE log_softmax is a correctness invariant (docs/precision.md):
+    upcast BEFORE log_softmax is a correctness invariant:
     bf16 logprob noise is the same order as real per-update policy drift.
     """
     logp = F.log_softmax(logits[:, :-1].float(), dim=-1)  # (B, T-1, V) f32
@@ -91,13 +92,10 @@ class TrainConfig:
     micro_batch_size: int = 4  # sequences per fwd/bwd (grad accumulation)
     max_skipped_steps: int = 3  # consecutive non-finite steps tolerated before crashing
     seed: int = 0  # minibatch shuffling (identical on every rank by the same seed)
-    # Two bf16 modes, mutually exclusive (docs/precision.md):
-    #   bf16          autocast: fp32 params ARE the masters, bf16 COMPUTE only.
-    #   bf16_weights  Megatron-style: bf16 PARAMS (half memory/publish bytes,
-    #                 FA2-compatible) + fp32 MASTER copies stepped by AdamW —
-    #                 never pure-bf16 (whose sub-ulp updates round to zero).
-    # SDPA under either mode dispatches to flash kernels.
-    bf16: bool = False
+    # Megatron-style mixed precision: bf16 PARAMS (half
+    # memory/publish bytes, FA2-compatible, SDPA dispatches flash kernels)
+    # + fp32 MASTER copies stepped by AdamW — never pure-bf16 (whose sub-ulp
+    # updates round to zero). slime's one and only precision mode.
     bf16_weights: bool = False
     compile: bool = False  # torch.compile(dynamic=True) on the training forward
 
@@ -134,7 +132,6 @@ class Trainer:
         # would mean replacing DDP's reducer — build if curves ever ask).
         self._masters: list[Tensor] | None = None
         if cfg.bf16_weights:
-            assert not cfg.bf16, "bf16_weights (bf16 params + fp32 masters) vs bf16 (autocast): pick one"
             self._masters = [p.detach().float().clone() for p in self.model.parameters()]
             self.model = self.model.to(torch.bfloat16)
         self.optimizer = torch.optim.AdamW(
@@ -145,7 +142,7 @@ class Trainer:
         self.step_count = 0
         self.consecutive_skipped = 0
 
-        # Distributed context, read ONCE here (docs/ddp.md): world=1 when no
+        # Distributed context, read ONCE here: world=1 when no
         # process group exists — the single-device path, zero dist machinery.
         if dist.is_available() and dist.is_initialized():
             self.rank, self.world = dist.get_rank(), dist.get_world_size()
@@ -159,13 +156,6 @@ class Trainer:
             )
         else:
             self.ddp = self.model  # no wrapper: forwards hit the module directly
-        # autocast context factory: real bf16 autocast on CUDA when asked,
-        # else a no-op — one code path, same as the other degenerate knobs.
-        self._autocast = (
-            (lambda: torch.autocast("cuda", torch.bfloat16))
-            if cfg.bf16 and device == "cuda"
-            else nullcontext
-        )
         if cfg.compile:
             # compile AFTER the DDP wrap (DDPOptimizer splits graphs at bucket
             # boundaries); self.model stays raw -> state_dict names stay clean
@@ -195,14 +185,14 @@ class Trainer:
         mb is the FULL minibatch — identical on every rank under DDP (the
         controller broadcasts whole batches). The GLOBAL denominator is
         computed from the whole minibatch mask and shared by every microbatch
-        AND every rank, so neither split can change the gradient
-        (docs/sync_training.md §5, docs/ddp.md §1). The rank slice, the loss
+        AND every rank, so neither split can change the gradient.
+        The rank slice, the loss
         scale, and no_sync below are all no-ops at world=1.
         """
         b = mb.input_ids.shape[0]
         assert b % self.world == 0, (
             f"batch rows {b} not divisible by world size {self.world} — "
-            "size target_groups*G accordingly (docs/ddp.md §1)"
+            "size target_groups*G accordingly"
         )
         denom = minibatch_denom(self.loss_agg, mb.loss_mask)  # full mask FIRST, slice after
         denom = denom.to(self.device) if isinstance(denom, torch.Tensor) else denom
@@ -217,8 +207,7 @@ class Trainer:
             sync = self.ddp.no_sync() if self.world > 1 and i < len(micros) - 1 else nullcontext()
             with sync:
                 micro = self._to_device(micro)
-                with self._autocast():  # bf16 compute (knob); logits upcast in gather_logprobs
-                    logits = self.ddp(micro.input_ids, attention_mask=micro.attention_mask).logits  # (b, T, V)
+                logits = self.ddp(micro.input_ids, attention_mask=micro.attention_mask).logits  # (b, T, V)
                 policy_logprobs = gather_logprobs(logits, micro.input_ids)  # (b, T) f32
                 loss_map, metrics = self.loss_fn(policy_logprobs, micro, self.loss_cfg)  # (b, T)
                 # x world: DDP mean-reduces grads; mean of world-scaled == SUM of unscaled
@@ -275,7 +264,7 @@ class Trainer:
         Pass a frozen reference model to fill batch.ref_logprobs the same way.
         Microbatched for memory; result lives on CPU with the batch. Always
         the RAW module — no DDP hooks under no_grad. Every rank recomputes the
-        FULL batch (docs/ddp.md §1): duplicated FLOPs, zero communication, and
+        FULL batch: duplicated FLOPs, zero communication, and
         the wall time is one forward either way since ranks run in parallel.
         """
         model = self.model if model is None else model
@@ -284,10 +273,10 @@ class Trainer:
         chunks = []
         for micro in iter_microbatches(batch, self.cfg.micro_batch_size):
             micro = self._to_device(micro)
-            with self._autocast():  # SAME compute path as training: pi_old must
-                # match pi_theta's kernels or the PPO ratio starts at 1 +- bf16
-                # noise instead of exactly 1 (clip-band pollution)
-                logits = model(micro.input_ids, attention_mask=micro.attention_mask).logits  # (b, T, V)
+            # same dtype/kernels as the training forward: pi_old must match
+            # pi_theta or the PPO ratio starts at 1 +- bf16 noise instead of
+            # exactly 1 (clip-band pollution)
+            logits = model(micro.input_ids, attention_mask=micro.attention_mask).logits  # (b, T, V)
             chunks.append(gather_logprobs(logits, micro.input_ids).cpu())  # (b, T)
         if was_training:
             model.train()

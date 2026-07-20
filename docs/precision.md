@@ -22,7 +22,7 @@ correctness invariants** so no config combination can silently break training.
 | Component | dtype | Where specified |
 |---|---|---|
 | Rollout engine compute (vLLM / HFEngine) | **bf16** CUDA, **fp32** MPS/CPU | knob 1: `HFEngine(dtype=...)` / `VLLMEngine(dtype=...)`; auto-picked per device (engine/hf_engine.py already does this) |
-| Learner forward/backward (weights-as-computed, activations, local grads) | **bf16** CUDA, **fp32** MPS/CPU | knob 2: `TrainConfig.bf16` (autocast: fp32 masters, bf16 compute) or `TrainConfig.bf16_weights` (Megatron-style: bf16 params + fp32 master copies in AdamW; grads reduce in bf16 — the one deviation) — both built 2026-07-20; dev path = fp32 end to end |
+| Learner forward/backward (weights-as-computed, activations, local grads) | **bf16** CUDA, **fp32** MPS/CPU | knob 2: `TrainConfig.bf16_weights` (Megatron-style: bf16 params + fp32 master copies in AdamW; grads reduce in bf16 — the one deviation from Megatron, which accumulates/all-reduces grads in fp32) — built 2026-07-20; an autocast variant (fp32 params, bf16 compute) existed briefly and was removed 2026-07-19: slime/Megatron ship exactly one mode. Dev path = fp32 end to end |
 | Checkpoints at rest (`save_pretrained`) | **bf16** (HF convention) | knob 3: `train.checkpoint_dtype` |
 | Master weights (what the optimizer updates) | **fp32**, always | hardcoded. bf16 has ~0.4% relative resolution: a `lr·grad ~ 1e-6` update rounds to zero (`1 + 1e-6 == 1` in bf16) and learning silently stops |
 | Optimizer states (Adam m, v) | **fp32**, always | hardcoded, same reason |

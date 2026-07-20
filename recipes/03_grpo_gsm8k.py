@@ -22,8 +22,7 @@ Wires together the finished stack, nothing bespoke:
 
 Scaling this recipe = swapping the CONFIG block + the engine list: on a GPU
 box, engines = [VLLMEngine(MODEL, gpu_id=g, seed=g) for g in
-placement.rollout_gpu_ids] and torchrun provides the trainer ranks
-(docs/async_tier2.md §11).
+placement.rollout_gpu_ids] and torchrun provides the trainer ranks.
 
 Missing on purpose (kept simple): eval harness, checkpointing schedule.
 """

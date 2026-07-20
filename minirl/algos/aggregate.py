@@ -27,13 +27,13 @@ the denominator, which is exactly how slime implements it: a reducer closure
 over per-sample denominators (cp_utils.get_sum_of_sample_mean), built once
 from config and handed to the loss.
 
-THE MICROBATCH RULE (docs/sync_training.md §5, pinned by the gradient-
+THE MICROBATCH RULE (pinned by the gradient-
 equivalence test; slime's docstring states the same): the denominator must be
 computed on the WHOLE MINIBATCH (minibatch_denom, once) and shared by every
 grad-accumulation slice — per-microbatch denominators silently reweight
 tokens. Under DDP the rule generalizes across ranks with NO collective:
 every rank computes the same denominator from the identical full batch and
-slices its rows after (train/distributed.py; docs/fsdp2.md §2).
+slices its rows after (train/trainer.py).
 ================================================================================
 """
 

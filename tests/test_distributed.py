@@ -1,4 +1,4 @@
-"""DDP equivalence tests (docs/ddp.md §6) — 2 CPU processes over gloo.
+"""DDP equivalence tests — 2 CPU processes over gloo.
 
 The invariance standard, same as microbatching: DISTRIBUTED AND
 SINGLE-PROCESS MUST PRODUCE THE SAME MATH ON IDENTICAL DATA. One spawn runs
@@ -80,13 +80,13 @@ def _worker(rank: int, port: int, out_dir: str) -> None:
         for loss_agg in LOSS_AGGS:
             torch.manual_seed(42)  # SAME init as the single-process reference
             # the ONE Trainer class: constructed after init_process_group, so
-            # it picks up world=2 and DDP-wraps itself (docs/ddp.md)
+            # it picks up world=2 and DDP-wraps itself
             trainer = Trainer(
                 TinyLM(),
                 grpo_loss,
                 GRPOConfig(loss_agg=loss_agg),
                 # micro_batch_size=1: each rank runs 2 microbatches -> exercises
-                # no_sync local accumulation with all-reduce-on-last (docs/ddp.md §3)
+                # no_sync local accumulation with all-reduce-on-last
                 TrainConfig(lr=1e-2, minibatch_size=8, micro_batch_size=1),
             )
             assert trainer.world == WORLD
@@ -123,4 +123,4 @@ def test_two_rank_ddp_matches_single_process(tmp_path):
                 f"loss_agg={loss_agg}: parameter {k} diverged between 2-rank DDP "
                 "and single-process training"
             )
-    assert results["ragged_asserted"], "B % world != 0 must fail loud (docs/ddp.md §1)"
+    assert results["ragged_asserted"], "B % world != 0 must fail loud"

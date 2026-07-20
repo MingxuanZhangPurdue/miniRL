@@ -1,7 +1,7 @@
 """Integration tests for HFEngine against the real base model.
 
 Runs on MPS/CPU (no CUDA needed). The logprob round-trip test is the Phase 0
-exit criterion from DESIGN §10: engine sampling logprobs must match a
+exit criterion: engine sampling logprobs must match a
 learner-style forward-pass recomputation.
 """
 

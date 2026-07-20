@@ -60,7 +60,8 @@ REMAINING. Written 2026-07-16, before the first box session.
 
   t_generate vs t_train from the metrics decide everything downstream:
   engine-bound -> more rollout GPUs / bigger max_num_seqs; trainer-bound ->
-  bf16 autocast + bigger micro_batch_size (ddp.md §5, measured-before-built).
+  --bf16-weights + bigger micro_batch_size, then A/B --compile (keep only if
+  mean t_train excluding iter 1 improves ~10%+).
 
 Known-unvalidated list this session retires: CUDA load_weights branch (1),
 EOS parity (1), gpu_id pinning (2), NCCL backend + broadcast at world 2 (4).

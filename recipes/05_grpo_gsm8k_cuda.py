@@ -6,7 +6,7 @@
     torchrun --nproc-per-node=2 recipes/05_grpo_gsm8k_cuda.py --train-gpus 2 --rollout-gpus 2
     # + wandb:  ... --wandb --project miniRL_tests --name box-2x2
 
-Layout (docs/async_tier2.md §11, slime's non-colocated ordering): trainer
+Layout (slime's non-colocated ordering): trainer
 ranks take GPUs 0..t-1 (torchrun LOCAL_RANK == GPU id), engines take
 t..t+r-1 via VLLMEngine(gpu_id=...). Rank 0 owns the engines + collection;
 followers train. Run recipes/04_smoke_vllm_cuda.py FIRST on a fresh box.
@@ -54,16 +54,14 @@ def main() -> None:
     ap.add_argument("--target-groups", type=int, default=8)    # B = G * this
     ap.add_argument("--max-new-tokens", type=int, default=512)
     ap.add_argument("--lr", type=float, default=1e-6)
-    ap.add_argument("--bf16", action="store_true",
-                    help="mixed precision A: fp32 params (the masters), bf16 autocast compute")
     ap.add_argument("--bf16-weights", action="store_true",
-                    help="mixed precision B (Megatron-style): bf16 params + fp32 master "
+                    help="mixed precision (Megatron-style): bf16 params + fp32 master "
                          "copies stepped by AdamW; halves param memory + publish bytes")
     ap.add_argument("--compile", action="store_true", help="torch.compile the training forward")
     ap.add_argument("--attn", default="sdpa", choices=["sdpa", "eager", "flash_attention_2"],
                     help="trainer attention impl; flash_attention_2 needs the flash-attn "
                          "package and bf16 params — pair it with --bf16-weights "
-                         "(sdpa under either bf16 mode reaches the same flash kernels)")
+                         "(sdpa under bf16 params reaches the same flash kernels)")
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--project", default="minirl")
     ap.add_argument("--name", default=None)
@@ -80,7 +78,7 @@ def main() -> None:
     assert b % world == 0, f"B={b} not divisible by world={world}"
     loss_cfg = GRPOConfig(use_tis=True)
     train_cfg = TrainConfig(lr=args.lr, ppo_epochs=1, minibatch_size=b, micro_batch_size=8,
-                            bf16=args.bf16, bf16_weights=args.bf16_weights, compile=args.compile)
+                            bf16_weights=args.bf16_weights, compile=args.compile)
     collect_cfg = CollectConfig(
         group_size=args.group_size, target_groups=args.target_groups, strategy="filter"
     )

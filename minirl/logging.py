@@ -19,7 +19,7 @@ through un-prefixed, so new losses' metrics land automatically — no registry):
     async/    staleness
 
 Derived here, not in the controllers (they emit raw facts only):
-    time/tokens_per_sec  = response_tokens / t_generate   (docs/fast_rl.md §2)
+    time/tokens_per_sec  = response_tokens / t_generate
     rollout/drop_rate    = groups_dropped / groups_generated  (dataset
                            saturation — the dynamic-sampling health signal)
 

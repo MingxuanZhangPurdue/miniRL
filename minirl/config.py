@@ -9,7 +9,7 @@ from typing import Literal
 
 @dataclass(frozen=True)
 class PlacementConfig:
-    """Single-node GPU split for the fully-async controller (docs/async_tier2.md §11).
+    """Single-node GPU split for the fully-async controller.
 
     slime's spec, minus what we don't need: `--actor-num-gpus-per-node` ->
     num_train_gpus, `--rollout-num-gpus` -> num_rollout_gpus; trainer ranks

@@ -36,7 +36,6 @@ Companion to:
     their "WHAT CHANGES vs GRPO" tables)
   - DAPO / Dr. GRPO                   (NAMED CONFIGS of this file — loss bodies
     are identical; see algos/README.md and the LOSSES registry)
-  - docs/sync_training.md §5          (how the trainer calls this)
 
 THE ONE IDEA: **PPO without a value function.** Sample a GROUP of G completions
 per prompt and use the group's reward statistics as the baseline (A_i above).

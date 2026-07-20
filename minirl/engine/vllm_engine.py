@@ -1,4 +1,4 @@
-"""VLLMEngine — continuous-batching rollout backend (tier 2, docs/async_tier2.md).
+"""VLLMEngine — continuous-batching rollout backend (tier 2).
 
 Wraps vLLM's low-level LLMEngine (add_request / step) instead of the blocking
 llm.generate(), because owning the step loop is what streaming collection
@@ -13,18 +13,20 @@ controllers/fully_async.py (collect_groups_dp drives poll() directly).
 round-based controller — generate()-style engines now enter via
 engine/stream_adapter.py instead.)
 
-IN-FLIGHT UPDATES ARE DEFERRED (decision 2026-07-10, docs/async_tier2.md §4):
+IN-FLIGHT UPDATES ARE DEFERRED (decision 2026-07-10):
 load_weights REQUIRES a quiescent engine (drain-then-publish, asserted), so
 every completion is generated under exactly ONE weight version — the tier-1
 invariant survives and Trajectory.version stays a scalar.
 
-Platform notes (spike findings, docs/async_tier2.md §8):
+Platform notes (spike findings):
   - vllm-metal (Mac): weight updates need BOTH the MLX tree load AND direct
     per-layer `self_attn._inner` assignments — `load_weights` alone silently
     skips attention (the paged wrapper hides it from the parameter tree).
-    Callable RPC needs VLLM_ALLOW_INSECURE_SERIALIZATION=1.
-  - CUDA vLLM: the torch branch below follows the standard RLHF pattern
-    (model.load_weights(name->tensor iterator)); UNVALIDATED until the box.
+    Callable RPC may need VLLM_ALLOW_INSECURE_SERIALIZATION=1.
+  - CUDA vLLM: weight publish uses the NATIVE `reload_weights` worker RPC
+    (no custom worker code; see load_weights). The previous custom callable
+    passed the rung-1 canary 2026-07-20; the native path needs one rerun of
+    recipes/04_smoke_vllm_cuda.py to re-validate.
   - EOS parity with HFEngine (response INCLUDES its eos token) must be
     verified on the first real run — vLLM configs differ on stop-token
     inclusion. gsm8k smoke vs HFEngine is the check.
@@ -52,7 +54,7 @@ class VLLMEngine:
         dtype: str = "bfloat16",
         max_model_len: int = 4096,
         seed: int = 0,  # DP fleets: give each engine a different seed (uncorrelated sampling)
-        gpu_id: int | None = None,  # pin to ONE GPU (DP placement, docs/async_tier2.md §11)
+        gpu_id: int | None = None,  # pin to ONE GPU (DP placement)
     ):
         from transformers import AutoTokenizer
         from vllm import EngineArgs, LLMEngine
@@ -110,7 +112,7 @@ class VLLMEngine:
         box, 2026-07-20). Owning the fan-out also removes any dependence on
         version-fragile n semantics. The group still finishes atomically when
         its slowest child does — no loss, since GRPO cannot reward/filter a
-        group before all G siblings exist (docs/async_tier2.md §2). Children
+        group before all G siblings exist. Children
         prefill on the next step, in whatever slots are free.
         """
         from vllm import SamplingParams as VSP
@@ -189,14 +191,20 @@ class VLLMEngine:
         """Publish learner weights into the RUNNING engine. Engine must be idle.
 
         Path-based: the state dict is written to a safetensors file and the
-        WORKER loads it — no tensor serialization over RPC. The worker-side
-        function handles both platforms; the Metal branch implements the
-        spike's full recipe (§8): MLX tree load + per-layer `_inner`
-        attention assignments (load_weights alone would silently skip
-        attention — the franken-policy trap).
+        WORKER loads it — no tensor serialization over RPC.
+          - CUDA: 100% vLLM-native. The worker exposes a `reload_weights`
+            RPC (v1/worker/gpu_worker.py) whose `weights_path=` mode points
+            the worker's own model loader at our directory: it globs the
+            *.safetensors, streams them through model.load_weights, and even
+            warns if any expected weight was missing. Named-method RPC — no
+            callable serialization, no VLLM_ALLOW_INSECURE_SERIALIZATION.
+          - Metal: custom recipe stays (the plugin's MetalModelRunner has no
+            reload_weights, and its paged-attention wrapper hides attention
+            from the parameter tree).
         """
         assert not self._pending, "load_weights during in-flight generation (drain first)"
         from safetensors.torch import save_file
+        from vllm.platforms import current_platform
 
         # Ship each STORAGE once: tied weights (Qwen: lm_head <- embed_tokens)
         # are aliases, and safetensors refuses aliased tensors (found on the
@@ -214,7 +222,10 @@ class VLLMEngine:
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, "learner.safetensors")
             save_file(tensors, path)
-            self.engine.collective_rpc(_apply_weights_from_file, args=(path,))
+            if current_platform.is_cuda():
+                self.engine.collective_rpc("reload_weights", kwargs={"weights_path": td})
+            else:
+                self.engine.collective_rpc(_metal_apply_weights_from_file, args=(path,))
         self.version = version
 
     def _to_traj(self, req_out, group: dict) -> Trajectory:
@@ -241,23 +252,18 @@ class VLLMEngine:
         )
 
 
-def _apply_weights_from_file(worker, path: str) -> str:
-    """Worker-side weight load (runs INSIDE the engine worker via collective_rpc).
+def _metal_apply_weights_from_file(worker, path: str) -> str:
+    """Metal-ONLY worker-side weight load (runs INSIDE the engine worker via
+    callable collective_rpc; may need VLLM_ALLOW_INSECURE_SERIALIZATION=1).
 
     Defined at module level for readability but shipped by VALUE through
     vLLM's callable-RPC (cloudpickle), so the worker env does not need minirl
-    importable. Metal branch = the validated spike recipe (docs/async_tier2.md
-    §8); torch branch = standard vLLM RLHF pattern, unvalidated until the box.
+    importable. This is the validated spike recipe.
+    CUDA never reaches here — it uses vLLM's native `reload_weights` RPC.
     """
+    import mlx.core as mx
+
     model = worker.model_runner.model
-    try:
-        import mlx.core as mx  # vllm-metal worker → the Metal recipe
-    except ImportError:
-        from safetensors.torch import load_file  # CUDA vLLM worker
-
-        model.load_weights(list(load_file(path).items()))
-        return "torch"
-
     weights = mx.load(path)
     model.load_weights(list(weights.items()), strict=False)  # tree params: embed/norms/MLP
     # Attention lives behind SDPAPagedAttentionWrapper._inner — invisible to
@@ -277,6 +283,6 @@ def _apply_weights_from_file(worker, path: str) -> str:
                 mod.weight = weights[key].astype(mod.weight.dtype)
                 n_assigned += 1
     assert n_assigned > 0 or not layers, (
-        "no attention weights assigned — plugin layout changed? (docs/async_tier2.md §8 canary)"
+        "no attention weights assigned — plugin layout changed? (spike canary)"
     )
     return f"metal:{n_assigned}"

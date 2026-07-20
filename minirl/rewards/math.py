@@ -1,4 +1,4 @@
-"""Math verifier: extraction -> normalization -> comparison (DESIGN: rewards/).
+"""Math verifier: extraction -> normalization -> comparison.
 
 The pipeline every math-RL reward follows:
   1. EXTRACT the candidate: the model is PROMPTED to end with a marked answer
