@@ -180,7 +180,19 @@ class VLLMEngine:
         assert not self._pending, "load_weights during in-flight generation (drain first)"
         from safetensors.torch import save_file
 
-        tensors = {k: v.detach().cpu().contiguous() for k, v in named_tensors}
+        # Ship each STORAGE once: tied weights (Qwen: lm_head <- embed_tokens)
+        # are aliases, and safetensors refuses aliased tensors (found on the
+        # A100 box 2026-07-20; the Mac never saw it — MPS->CPU moves broke the
+        # aliasing by copying). Loaders re-tie on their side: vLLM skips
+        # lm_head for tied configs, HFEngine loads with strict=False.
+        tensors: dict[str, Tensor] = {}
+        seen: set[int] = set()
+        for k, v in named_tensors:
+            ptr = v.untyped_storage().data_ptr()
+            if ptr in seen:
+                continue
+            seen.add(ptr)
+            tensors[k] = v.detach().cpu().contiguous()
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, "learner.safetensors")
             save_file(tensors, path)
