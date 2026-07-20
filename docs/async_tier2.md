@@ -79,11 +79,14 @@ engine/stream_adapter.py):
 
 Design decisions, each with its reason:
 
-- **One request per prompt with `SamplingParams(n=G)`**, not G separate
-  requests. vLLM returns all G completions in one `RequestOutput`; the
-  request finishes when its slowest member does — which is not a compromise,
-  because GRPO cannot reward/filter a group until all G siblings exist
-  anyway. Group tracking = request tracking; no reassembly bookkeeping.
+- **G child requests (n=1 each) per prompt, reassembled by the engine class**
+  — REVERSED 2026-07-20 from the original one-request-n=G design: vLLM V1
+  implements n>1 in its high-level entrypoints (LLM/AsyncLLM parallel
+  sampling), NOT in LLMEngine — add_request(n=G) yields ONE completion (A100
+  box finding). Owning the fan-out costs a small waiting-set per group and
+  removes all dependence on version-fragile n semantics. The group still
+  finishes atomically when its slowest child does (GRPO cannot reward/filter
+  a partial group anyway); the collector sees nothing but whole groups.
 - **Behavior logprobs**: `SamplingParams(logprobs=0)` — vLLM attaches the
   SAMPLED token's logprob, computed AT SAMPLING TIME each decode step. This
   is the property the whole off-policy story rests on under in-flight

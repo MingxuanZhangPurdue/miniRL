@@ -102,35 +102,46 @@ class VLLMEngine:
         return len(self._pending)
 
     def submit(self, prompt_ids: Tensor, params: SamplingParams, meta: dict | None = None) -> str:
-        """Queue ONE prompt for a whole group: one vLLM request with n=G.
+        """Queue ONE prompt for a whole group: G CHILD requests with n=1 each.
 
-        The request finishes atomically when its slowest member does — no
-        loss, since GRPO cannot reward/filter a group before all G siblings
-        exist (docs/async_tier2.md §2). vLLM starts prefilling it on the next
-        step, in whatever slots are free (continuous batching).
+        The fan-out is OURS, not vLLM's: V1 implements n>1 in its high-level
+        entrypoints (LLM/AsyncLLM parallel sampling), NOT in LLMEngine —
+        add_request with n=G returns a single completion (found on the A100
+        box, 2026-07-20). Owning the fan-out also removes any dependence on
+        version-fragile n semantics. The group still finishes atomically when
+        its slowest child does — no loss, since GRPO cannot reward/filter a
+        group before all G siblings exist (docs/async_tier2.md §2). Children
+        prefill on the next step, in whatever slots are free.
         """
         from vllm import SamplingParams as VSP
         from vllm.inputs import TokensPrompt
 
-        rid = f"req-{self._next_id}"
+        gid = f"req-{self._next_id}"
         self._next_id += 1
-        self.engine.add_request(
-            rid,
-            TokensPrompt(prompt_token_ids=[int(t) for t in prompt_ids]),
-            VSP(
-                n=params.n,
-                temperature=params.temperature,
-                top_p=params.top_p,
-                max_tokens=params.max_new_tokens,
-                logprobs=0,  # attach the SAMPLED token's logprob, computed at sampling time
-            ),
-        )
-        self._pending[rid] = {
+        group = {
             "prompt_ids": prompt_ids.cpu(),
             "meta": dict(meta or {}),
             "version": self.version,  # the ONLY version this group will ever see (drain-then-publish)
+            "waiting": set(),  # child ids still generating
+            "done": [],  # finished children's Trajectories
         }
-        return rid
+        self._pending[gid] = group
+        token_ids = [int(t) for t in prompt_ids]
+        for j in range(params.n):
+            cid = f"{gid}/{j}"
+            group["waiting"].add(cid)
+            self.engine.add_request(
+                cid,
+                TokensPrompt(prompt_token_ids=token_ids),
+                VSP(
+                    n=1,
+                    temperature=params.temperature,
+                    top_p=params.top_p,
+                    max_tokens=params.max_new_tokens,
+                    logprobs=0,  # attach the SAMPLED token's logprob, computed at sampling time
+                ),
+            )
+        return gid
 
     def poll(self) -> list[list[Trajectory]]:
         """Advance the engine one step; return every group that finished.
@@ -142,8 +153,15 @@ class VLLMEngine:
         out, self._stash = self._stash, []
         if self._pending:
             for req_out in self.engine.step():
-                if req_out.finished:
-                    out.append(self._to_group(req_out))
+                if not req_out.finished:
+                    continue
+                gid = req_out.request_id.rsplit("/", 1)[0]
+                group = self._pending[gid]
+                group["waiting"].discard(req_out.request_id)
+                group["done"].append(self._to_traj(req_out, group))
+                if not group["waiting"]:  # slowest child just finished
+                    self._pending.pop(gid)
+                    out.append(group["done"])
         return out
 
     def stash(self, group: list[Trajectory]) -> None:
@@ -199,33 +217,28 @@ class VLLMEngine:
             self.engine.collective_rpc(_apply_weights_from_file, args=(path,))
         self.version = version
 
-    def _to_group(self, req_out) -> list[Trajectory]:
-        """One finished RequestOutput -> G Trajectories (CPU, by contract)."""
-        req = self._pending.pop(req_out.request_id)
-        prompt: Tensor = req["prompt_ids"]  # (T_prompt,)
+    def _to_traj(self, req_out, group: dict) -> Trajectory:
+        """One finished CHILD RequestOutput (n=1) -> one Trajectory (CPU)."""
+        prompt: Tensor = group["prompt_ids"]  # (T_prompt,)
         n_p = prompt.numel()
-        group = []
-        for comp in req_out.outputs:
-            ids = torch.tensor(list(comp.token_ids), dtype=torch.long)  # (n_gen,)
-            n_g = ids.numel()
-            if comp.logprobs:  # list[dict[token_id -> Logprob]], sampled token always present
-                lps = torch.tensor(
-                    [comp.logprobs[t][int(ids[t])].logprob for t in range(n_g)], dtype=torch.float32
-                )
-            else:
-                lps = torch.zeros(n_g)
-            group.append(
-                Trajectory(
-                    input_ids=torch.cat([prompt, ids]),  # one row's (T,): prompt_len + response_len
-                    loss_mask=torch.cat(
-                        [torch.zeros(n_p, dtype=torch.bool), torch.ones(n_g, dtype=torch.bool)]
-                    ),
-                    logprobs=torch.cat([torch.zeros(n_p), lps]),
-                    version=req["version"],
-                    meta=dict(req["meta"]),
-                )
+        (comp,) = req_out.outputs  # n=1 child: exactly one completion
+        ids = torch.tensor(list(comp.token_ids), dtype=torch.long)  # (n_gen,)
+        n_g = ids.numel()
+        if comp.logprobs:  # list[dict[token_id -> Logprob]], sampled token always present
+            lps = torch.tensor(
+                [comp.logprobs[t][int(ids[t])].logprob for t in range(n_g)], dtype=torch.float32
             )
-        return group
+        else:
+            lps = torch.zeros(n_g)
+        return Trajectory(
+            input_ids=torch.cat([prompt, ids]),  # one row's (T,): prompt_len + response_len
+            loss_mask=torch.cat(
+                [torch.zeros(n_p, dtype=torch.bool), torch.ones(n_g, dtype=torch.bool)]
+            ),
+            logprobs=torch.cat([torch.zeros(n_p), lps]),
+            version=group["version"],
+            meta=dict(group["meta"]),
+        )
 
 
 def _apply_weights_from_file(worker, path: str) -> str:
