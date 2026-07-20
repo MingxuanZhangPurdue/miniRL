@@ -15,7 +15,7 @@ REMAINING. Written 2026-07-16, before the first box session.
       pip install vllm transformers datasets math-verify wandb pytest
       cd miniRL && python -m pytest tests/ -q       # 71 CPU tests must pass here too
 
-## 1. Engine smoke + canary (1 GPU)
+## 1. Engine smoke + canary (1 GPU) — PASSED 2026-07-20 (A100)
 
       python recipes/04_smoke_vllm_cuda.py
 

@@ -34,6 +34,7 @@ knob, measured before built (docs/ddp.md §5). The fp32 islands (logprobs,
 aggregation, optimizer) hold regardless.
 """
 
+import os
 from contextlib import nullcontext
 from dataclasses import dataclass
 
@@ -49,9 +50,16 @@ from minirl.rollout.types import Batch
 
 
 def setup_distributed(backend: str | None = None) -> tuple[int, int]:
-    """Join the process group (torchrun / mp.spawn set the env). -> (rank, world).
-    Call BEFORE constructing the Trainer — it reads dist state at __init__."""
+    """Join the process group IF a launcher started us. -> (rank, world).
+
+    torchrun / mp.spawn set RANK et al.; plain `python recipe.py` sets
+    nothing and gets (0, 1) with no process group — the same script serves
+    both launch modes. Call BEFORE constructing the Trainer — it reads dist
+    state at __init__.
+    """
     if not dist.is_initialized():
+        if "RANK" not in os.environ:  # no launcher: single process, no dist
+            return 0, 1
         dist.init_process_group(backend or ("nccl" if torch.cuda.is_available() else "gloo"))
     return dist.get_rank(), dist.get_world_size()
 

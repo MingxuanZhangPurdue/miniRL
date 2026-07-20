@@ -50,7 +50,9 @@ single-node GPU split, slime's layout). Retired the same day: round_based /
 streaming controllers, rollout/sampling + rollout/streaming collectors
 (every one a k=1 special case of fully_async). REMAINING on-box: real
 vllm-metal smoke (EOS parity + weight canary), per-engine GPU pinning spike
-(§10a), NCCL/bf16.
+(§10a) and NCCL — the CUDA engine smoke PASSED 2026-07-20 (weight canary, EOS
+parity, logprob gap; findings: EngineCore fork->spawn, tied-weight dedupe, V1
+n>1 fan-out is ours now).
 
 **Decided and documented, not yet built:** the sync controller
 (`controllers/sync.py` — collect -> train -> publish via collect_groups_dp,

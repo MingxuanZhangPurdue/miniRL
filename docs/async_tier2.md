@@ -238,7 +238,9 @@ Real-engine validation, next in line (runs from `~/.venv-vllm-metal` with
 the repo on PYTHONPATH; NOT under pytest/mingxuan — vLLM is not installed
 there, by design):
 
-4. vllm-metal smoke: `VLLMEngine` submit/poll on Qwen3-0.6B (streaming contract
+4. [CUDA: PASSED 2026-07-20, three findings baked in — spawn, tied weights,
+   V1 n-fanout] vllm-metal smoke still pending on the Mac: `VLLMEngine`
+   submit/poll on Qwen3-0.6B (streaming contract
    parity vs HFEngine: grouped order, loss_mask, logprobs present);
    **EOS-parity check** — HFEngine's responses INCLUDE the eos token; verify
    vLLM's token_ids do too, else fix in `_to_group`; the **weight-update
