@@ -19,7 +19,12 @@ MODEL = os.environ.get("MINIRL_TEST_MODEL", "Qwen/Qwen3-0.6B")
 
 @pytest.fixture(scope="module")
 def engine() -> HFEngine:
-    return HFEngine(MODEL, max_batch_size=4)
+    # fp32 EVERYWHERE, including CUDA (where HFEngine defaults to bf16): the
+    # logprob round-trip below pins ALIGNMENT logic to 1e-3, and bf16's
+    # decode-vs-prefill kernel divergence alone is ~1e-1 nats on near-tie
+    # tokens (first observed on the A100 box, 2026-07-16) — real, harmless,
+    # and TIS-corrected in training; not what this test measures.
+    return HFEngine(MODEL, max_batch_size=4, dtype=torch.float32)
 
 
 @pytest.fixture(scope="module")
