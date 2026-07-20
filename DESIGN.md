@@ -308,12 +308,16 @@ miniRL/
 │       └── misc.py              # NaN guards, timing, memory stats
 │
 ├── recipes/                     # end-to-end runnable experiments (the "model flow")
-│   ├── 01_sft.py
-│   ├── 02_dpo.py
-│   ├── 03_grpo_gsm8k.py         # RLVR on math
-│   ├── 04_async_grpo.py         # same task, async infra (GLM-5 style)
-│   ├── 05_agentic_tooluse.py    # multi-turn tool-use RL
-│   └── 06_onpolicy_distill.py   # MOPD-lite from a larger teacher
+│   ├── 01_sft.py                # (planned)
+│   ├── 02_dpo.py                # (planned)
+│   ├── 03_grpo_gsm8k.py         # [done] RLVR on math, Mac/MPS smoke (already async:
+│   │                            #   fit_async with StreamAdapter(HFEngine), k=1)
+│   ├── 04_smoke_vllm_cuda.py    # [done, needs box] on-box engine validation ladder:
+│   │                            #   contract / EOS parity / logprob gap / weight canary
+│   ├── 05_grpo_gsm8k_cuda.py    # [done, needs box] k vLLM engines x m DDP ranks via
+│   │                            #   torchrun + PlacementConfig (docs/box_runbook.md)
+│   ├── 06_agentic_tooluse.py    # (planned) multi-turn tool-use RL
+│   └── 07_onpolicy_distill.py   # (planned) MOPD-lite from a larger teacher
 │
 ├── configs/                     # one YAML per experiment
 │   ├── sft_qwen06b.yaml
