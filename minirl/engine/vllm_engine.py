@@ -57,6 +57,13 @@ class VLLMEngine:
         from transformers import AutoTokenizer
         from vllm import EngineArgs, LLMEngine
 
+        # vLLM launches EngineCore as a subprocess via FORK by default, and a
+        # forked child cannot re-initialize CUDA. Our ordering rule (§11)
+        # GUARANTEES the parent has a live CUDA context before engines exist
+        # (learner first), so fork always dies — force spawn (found on the
+        # A100 box, 2026-07-20). Safe: recipes guard __main__, and the
+        # CUDA_VISIBLE_DEVICES pinning below inherits through spawn the same.
+        os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         self.model_name_or_path = model_name_or_path
         # GPU pinning by env (§10(a)): the V1 EngineCore SUBPROCESS spawned
         # inside from_engine_args inherits CUDA_VISIBLE_DEVICES; the parent's
