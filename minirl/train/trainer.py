@@ -83,6 +83,15 @@ class TrainConfig:
     micro_batch_size: int = 4  # sequences per fwd/bwd (grad accumulation)
     max_skipped_steps: int = 3  # consecutive non-finite steps tolerated before crashing
     seed: int = 0  # minibatch shuffling (identical on every rank by the same seed)
+    # Two bf16 modes, mutually exclusive (docs/precision.md):
+    #   bf16          autocast: fp32 params ARE the masters, bf16 COMPUTE only.
+    #   bf16_weights  Megatron-style: bf16 PARAMS (half memory/publish bytes,
+    #                 FA2-compatible) + fp32 MASTER copies stepped by AdamW —
+    #                 never pure-bf16 (whose sub-ulp updates round to zero).
+    # SDPA under either mode dispatches to flash kernels.
+    bf16: bool = False
+    bf16_weights: bool = False
+    compile: bool = False  # torch.compile(dynamic=True) on the training forward
 
 
 class Trainer:
@@ -107,8 +116,22 @@ class Trainer:
         # the trainer applies whatever the config says, mechanically — all
         # normalization knowledge lives in aggregate.py (loss_agg: str | int).
         self.loss_agg = getattr(loss_cfg, "loss_agg", "token_mean")
+        # Megatron-style bf16 (cfg.bf16_weights): model params become BF16
+        # (half the param memory, publish bytes, and FA2-compatible weights)
+        # while the optimizer steps FP32 MASTER copies — the weight update
+        # never rounds through bf16's ~3 decimal digits. Masters are cloned
+        # BEFORE the cast so they start from the pristine checkpoint.
+        # Documented deviation from full Megatron: grads still accumulate and
+        # all-reduce in bf16 (DDP reduces in param dtype; fp32 main-grads
+        # would mean replacing DDP's reducer — build if curves ever ask).
+        self._masters: list[Tensor] | None = None
+        if cfg.bf16_weights:
+            assert not cfg.bf16, "bf16_weights (bf16 params + fp32 masters) vs bf16 (autocast): pick one"
+            self._masters = [p.detach().float().clone() for p in self.model.parameters()]
+            self.model = self.model.to(torch.bfloat16)
         self.optimizer = torch.optim.AdamW(
-            model.parameters(), lr=cfg.lr, betas=cfg.adam_betas, weight_decay=cfg.weight_decay
+            self._masters if self._masters is not None else model.parameters(),
+            lr=cfg.lr, betas=cfg.adam_betas, weight_decay=cfg.weight_decay,
         )  # fp32 states regardless of model dtype (precision invariant)
         self.shuffle_rng = torch.Generator().manual_seed(cfg.seed)
         self.step_count = 0
@@ -128,6 +151,17 @@ class Trainer:
             )
         else:
             self.ddp = self.model  # no wrapper: forwards hit the module directly
+        # autocast context factory: real bf16 autocast on CUDA when asked,
+        # else a no-op — one code path, same as the other degenerate knobs.
+        self._autocast = (
+            (lambda: torch.autocast("cuda", torch.bfloat16))
+            if cfg.bf16 and device == "cuda"
+            else nullcontext
+        )
+        if cfg.compile:
+            # compile AFTER the DDP wrap (DDPOptimizer splits graphs at bucket
+            # boundaries); self.model stays raw -> state_dict names stay clean
+            self.ddp = torch.compile(self.ddp, dynamic=True)
 
     # ---------------- update phase ----------------
 
@@ -175,7 +209,8 @@ class Trainer:
             sync = self.ddp.no_sync() if self.world > 1 and i < len(micros) - 1 else nullcontext()
             with sync:
                 micro = self._to_device(micro)
-                logits = self.ddp(micro.input_ids, attention_mask=micro.attention_mask).logits  # (b, T, V)
+                with self._autocast():  # bf16 compute (knob); logits upcast in gather_logprobs
+                    logits = self.ddp(micro.input_ids, attention_mask=micro.attention_mask).logits  # (b, T, V)
                 policy_logprobs = gather_logprobs(logits, micro.input_ids)  # (b, T) f32
                 loss_map, metrics = self.loss_fn(policy_logprobs, micro, self.loss_cfg)  # (b, T)
                 # x world: DDP mean-reduces grads; mean of world-scaled == SUM of unscaled
@@ -184,8 +219,15 @@ class Trainer:
             total_loss += loss.item() / self.world  # log the TRUE contribution, not the scaled one
             micro_metrics.append((int(micro.loss_mask.sum()), {k: v.item() for k, v in metrics.items()}))
 
-        # post-reduce grads are identical on every rank: vanilla local clipping
-        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.cfg.max_grad_norm)
+        # post-reduce grads are identical on every rank: vanilla local
+        # clipping. Master mode first hands the bf16 grads to the fp32
+        # masters — clip, step, and NaN-guard then all happen in fp32
+        # (Megatron's main-grad hand-off, minus the fp32 reduce).
+        if self._masters is not None:
+            for p, m in zip(self.model.parameters(), self._masters):
+                m.grad = None if p.grad is None else p.grad.detach().float()
+        opt_params = self._masters if self._masters is not None else self.model.parameters()
+        grad_norm = torch.nn.utils.clip_grad_norm_(opt_params, self.cfg.max_grad_norm)
         if not torch.isfinite(grad_norm):
             # NaN guard: drop this step entirely, crash if it becomes a pattern.
             # grad_norm is post-reduce, hence identical across ranks: all ranks
@@ -197,8 +239,14 @@ class Trainer:
             )
         else:
             self.optimizer.step()
+            if self._masters is not None:
+                with torch.no_grad():  # fp32 master -> bf16 param: the ONLY cast point
+                    for p, m in zip(self.model.parameters(), self._masters):
+                        p.copy_(m)
             self.optimizer.zero_grad(set_to_none=True)
             self.consecutive_skipped = 0
+        if self._masters is not None:
+            self.model.zero_grad(set_to_none=True)  # bf16 grads live on the model, not the optimizer
         self.step_count += 1
 
         # token-weighted mean of algo metrics across microbatches (rank-local rows)
@@ -228,7 +276,10 @@ class Trainer:
         chunks = []
         for micro in iter_microbatches(batch, self.cfg.micro_batch_size):
             micro = self._to_device(micro)
-            logits = model(micro.input_ids, attention_mask=micro.attention_mask).logits  # (b, T, V)
+            with self._autocast():  # SAME compute path as training: pi_old must
+                # match pi_theta's kernels or the PPO ratio starts at 1 +- bf16
+                # noise instead of exactly 1 (clip-band pollution)
+                logits = model(micro.input_ids, attention_mask=micro.attention_mask).logits  # (b, T, V)
             chunks.append(gather_logprobs(logits, micro.input_ids).cpu())  # (b, T)
         if was_training:
             model.train()

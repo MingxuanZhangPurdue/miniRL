@@ -54,6 +54,16 @@ def main() -> None:
     ap.add_argument("--target-groups", type=int, default=8)    # B = G * this
     ap.add_argument("--max-new-tokens", type=int, default=512)
     ap.add_argument("--lr", type=float, default=1e-6)
+    ap.add_argument("--bf16", action="store_true",
+                    help="mixed precision A: fp32 params (the masters), bf16 autocast compute")
+    ap.add_argument("--bf16-weights", action="store_true",
+                    help="mixed precision B (Megatron-style): bf16 params + fp32 master "
+                         "copies stepped by AdamW; halves param memory + publish bytes")
+    ap.add_argument("--compile", action="store_true", help="torch.compile the training forward")
+    ap.add_argument("--attn", default="sdpa", choices=["sdpa", "eager", "flash_attention_2"],
+                    help="trainer attention impl; flash_attention_2 needs the flash-attn "
+                         "package and bf16 params — pair it with --bf16-weights "
+                         "(sdpa under either bf16 mode reaches the same flash kernels)")
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--project", default="minirl")
     ap.add_argument("--name", default=None)
@@ -69,7 +79,8 @@ def main() -> None:
     b = args.group_size * args.target_groups
     assert b % world == 0, f"B={b} not divisible by world={world}"
     loss_cfg = GRPOConfig(use_tis=True)
-    train_cfg = TrainConfig(lr=args.lr, ppo_epochs=1, minibatch_size=b, micro_batch_size=8)
+    train_cfg = TrainConfig(lr=args.lr, ppo_epochs=1, minibatch_size=b, micro_batch_size=8,
+                            bf16=args.bf16, bf16_weights=args.bf16_weights, compile=args.compile)
     collect_cfg = CollectConfig(
         group_size=args.group_size, target_groups=args.target_groups, strategy="filter"
     )
@@ -77,8 +88,14 @@ def main() -> None:
         temperature=1.0, top_p=0.95, max_new_tokens=args.max_new_tokens, n=args.group_size
     )
 
-    # learner FIRST (CUDA context before engine env-pinning; fp32 = the tested path)
-    learner = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.float32)
+    # learner FIRST (CUDA context before engine env-pinning). Load fp32 even
+    # for --bf16-weights: the trainer clones its fp32 masters from the
+    # PRISTINE checkpoint before casting params down. Only fa2 forces a bf16
+    # LOAD (its dtype check) — masters then start from bf16-rounded weights.
+    learner_dtype = torch.bfloat16 if args.attn == "flash_attention_2" else torch.float32
+    learner = AutoModelForCausalLM.from_pretrained(
+        MODEL, dtype=learner_dtype, attn_implementation=args.attn
+    )
     trainer = Trainer(learner, grpo_loss, loss_cfg, train_cfg, device="cuda")
 
     engines, prompt_source, reward_fn, run = [], None, None, None

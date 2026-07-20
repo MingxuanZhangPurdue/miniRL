@@ -192,3 +192,49 @@ def test_nan_guard_skips_then_crashes():
     assert trainer.consecutive_skipped == 1
     with pytest.raises(AssertionError, match="non-finite"):
         trainer.step(batch)  # skip 2 > max_skipped_steps
+
+
+# ---------------- bf16_weights: Megatron-style fp32 masters ----------------
+
+
+def test_bf16_weights_masters_step_in_fp32():
+    torch.manual_seed(0)
+    trainer = Trainer(
+        TinyLM(), grpo_loss, GRPOConfig(),
+        TrainConfig(lr=1e-2, minibatch_size=8, micro_batch_size=8, bf16_weights=True),
+    )
+    assert all(p.dtype == torch.bfloat16 for p in trainer.model.parameters())
+    assert all(m.dtype == torch.float32 for m in trainer._masters)
+    masters0 = [m.clone() for m in trainer._masters]
+
+    trainer.fit_batch(make_batch(make_trajs(), pad_id=0)[0])
+
+    # masters moved in fp32, params are EXACTLY the bf16 cast of the masters
+    assert any(not torch.equal(m, m0) for m, m0 in zip(trainer._masters, masters0))
+    for p, m in zip(trainer.model.parameters(), trainer._masters):
+        assert p.dtype == torch.bfloat16
+        assert torch.equal(p, m.to(torch.bfloat16))
+    assert all(p.grad is None for p in trainer.model.parameters())  # cleared for next step
+
+
+def test_bf16_weights_preserves_sub_ulp_updates():
+    """THE reason masters exist: with tiny lr, pure-bf16 updates round to
+    zero (weight += 1e-6*grad < one bf16 ulp), but fp32 masters accumulate."""
+    torch.manual_seed(0)
+    trainer = Trainer(
+        TinyLM(), grpo_loss, GRPOConfig(),
+        TrainConfig(lr=1e-7, minibatch_size=8, micro_batch_size=8, bf16_weights=True),
+    )
+    masters0 = [m.clone() for m in trainer._masters]
+    for _ in range(3):
+        trainer.fit_batch(make_batch(make_trajs(), pad_id=0)[0])
+    moved = sum((m - m0).abs().sum().item() for m, m0 in zip(trainer._masters, masters0))
+    assert moved > 0, "fp32 masters must accumulate updates far below bf16 ulp"
+
+
+def test_bf16_and_bf16_weights_are_mutually_exclusive():
+    with pytest.raises(AssertionError, match="pick one"):
+        Trainer(
+            TinyLM(), grpo_loss, GRPOConfig(),
+            TrainConfig(bf16=True, bf16_weights=True),
+        )
