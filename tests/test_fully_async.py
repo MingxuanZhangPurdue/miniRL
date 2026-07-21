@@ -1,12 +1,11 @@
 """fully_async controller tests — CPU only, no vLLM, no GPUs.
 
 Consolidates the retired test_streaming.py + test_data_parallel.py
-suites: a FakeStreamEngine (deterministic, poll-driven,
-version-stamping, drain-before-publish ASSERTED) and a FakeGenEngine (the
-HFEngine duck-type, fed through StreamAdapter) exercise collect_groups_dp
-and fit_async end to end with the real trainer/batching/loss code. The
-2-process gloo test pins the rank-0/follower wiring
-against a single-process reference.
+suites: a FakeStreamEngine (deterministic, poll-driven, version-stamping,
+drain-before-publish ASSERTED — the executable spec of the streaming
+contract VLLMEngine implements) exercises collect_groups_dp and fit_async
+end to end with the real trainer/batching/loss code. The 2-process gloo
+test pins the rank-0/follower wiring against a single-process reference.
 """
 
 import os
@@ -22,7 +21,6 @@ from torch import nn
 from minirl.algos import GRPOConfig, grpo_loss
 from minirl.config import CollectConfig, PlacementConfig
 from minirl.controllers import collect_groups_dp, fit_async
-from minirl.engine import StreamAdapter
 from minirl.rollout.types import SamplingParams, Trajectory
 from tests.fake_trainer import TrainConfig, Trainer
 
@@ -138,43 +136,6 @@ class PacedEngine(FakeStreamEngine):
     def poll(self):
         time.sleep(self.dt)
         return super().poll()
-
-
-class FakeGenEngine:
-    """generate()-only fake — the HFEngine duck-type StreamAdapter wraps:
-    grouped-by-prompt trajectories, version-stamped, same parity counter."""
-
-    pad_id = 0
-
-    def __init__(self):
-        self.version = -1
-        self.published: list[int] = []
-        self.received: dict[str, torch.Tensor] = {}
-        self._counter = 0
-
-    def generate(self, prompt_ids: list, params: SamplingParams) -> list[Trajectory]:
-        assert self.version >= 0, "generate before first publish"
-        out = []
-        for p in prompt_ids:
-            for _ in range(params.n):
-                resp = torch.tensor([1, 2, 3, 4, self._counter % VOCAB])
-                self._counter += 1
-                n = p.numel()
-                mask = torch.cat([torch.zeros(n, dtype=torch.bool), torch.ones(5, dtype=torch.bool)])
-                out.append(
-                    Trajectory(
-                        input_ids=torch.cat([p, resp]),
-                        loss_mask=mask,
-                        logprobs=torch.where(mask, torch.full((n + 5,), -1.0), torch.zeros(n + 5)),
-                        version=self.version,
-                    )
-                )
-        return out
-
-    def load_weights(self, named_tensors, version: int) -> None:
-        self.received = {k: v.clone() for k, v in named_tensors}
-        self.version = version
-        self.published.append(version)
 
 
 def parity_reward(t: Trajectory) -> float:
@@ -304,45 +265,6 @@ def test_dp_leftovers_consumed_by_next_call():
     _, stats2 = collect_groups_dp(engines, parity_reward, pid_source(20), cfg, SAMPLING)
     assert stats2["groups"] == 3
     assert stats2["submitted"] <= n_before  # leftovers reduced the new dealing needed
-
-
-# ---------------- StreamAdapter (the HFEngine path) ----------------
-
-
-def test_stream_adapter_one_poll_is_one_round():
-    adapter = StreamAdapter(FakeGenEngine())
-    adapter.load_weights(iter([]), version=0)
-    for i in range(3):
-        adapter.submit(torch.randint(1, VOCAB, (3,)), SAMPLING, {"pid": i})
-    assert adapter.n_inflight == 3
-    groups = adapter.poll()  # ONE round: everything finishes together
-    assert len(groups) == 3 and adapter.n_inflight == 0
-    assert [g[0].meta["pid"] for g in groups] == [0, 1, 2]  # meta attached, order kept
-    assert all(len(g) == SAMPLING.n and t.version == 0 for g in groups for t in g)
-    assert adapter.poll() == []  # empty round: nothing pending, nothing stashed
-
-
-def test_stream_adapter_under_the_controller():
-    engine = FakeGenEngine()
-    torch.manual_seed(0)
-    trainer = Trainer(
-        TinyLM(), grpo_loss, GRPOConfig(),
-        TrainConfig(lr=1e-3, minibatch_size=4, micro_batch_size=4),
-    )
-    history = fit_async(
-        engines=[StreamAdapter(engine)],
-        trainer=trainer,
-        reward_fn=parity_reward,
-        prompt_source=lambda n: [torch.randint(1, VOCAB, (3,)) for _ in range(n)],
-        sampling=SAMPLING,
-        collect_cfg=CollectConfig(group_size=2, target_groups=2, strategy="filter"),
-        num_iterations=3,
-        publish_interval=1,
-    )
-    assert engine.published == [0, 1, 2, 3]  # round_based semantics under the ONE controller
-    current = {k: v.cpu() for k, v in trainer.model.state_dict().items()}
-    assert all(torch.equal(engine.received[k], current[k]) for k in current)
-    assert all(0 <= m["staleness"] <= 2 for m in history)
 
 
 # ---------------- fit_async controller (fake streaming engines) ----------------

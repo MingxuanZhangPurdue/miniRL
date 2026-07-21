@@ -15,13 +15,17 @@ from torch import Tensor
 class SamplingParams:
     """Request side of the engine contract (field names mirror vllm.SamplingParams).
 
-    Engines are duck-typed — no base class. An engine is any object with:
-      generate(prompt_ids: list[(T_i,) int64], params: SamplingParams) -> list[Trajectory]
-          returning B*n trajectories grouped by prompt [p0_s0.. p0_s{n-1}, p1_s0, ..],
-          each carrying RAW-model behavior logprobs and the
-          engine's current weight version;
-      load_weights(named_tensors: iterable[(str, Tensor)], version: int) -> None.
-    HFEngine (engine/hf_engine.py) is the reference; VLLMEngine (CUDA) matches it.
+    Engines are duck-typed — no base class. An engine is any object speaking
+    the STREAMING contract consumed by controllers/fully_async.py:
+      submit(prompt_ids: (T,) int64, params, meta) -> request id — ONE prompt,
+          a whole group of params.n completions;
+      poll() -> list[list[Trajectory]] — finished GROUPS, each trajectory
+          carrying RAW-model behavior logprobs and the engine's weight version;
+      stash(group) / drain() / n_inflight / pad_id;
+      load_weights(named_tensors: iterable[(str, Tensor)], version: int) -> None
+          (drain first — asserted; every completion sees exactly ONE version).
+    VLLMEngine (engine/vllm_engine.py) is THE engine (vLLM-only, 2026-07-20);
+    tests/test_fully_async.py's FakeStreamEngine is the executable spec.
     """
 
     temperature: float = 1.0

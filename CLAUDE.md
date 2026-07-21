@@ -18,11 +18,23 @@ glossary (symbols, shapes, the four policies, notes/ symbol mapping) is
 
 ## Environment & commands
 
-- Python: the `mingxuan` conda env, ALWAYS —
+TWO dev machines share this repo; detect which one you are on before running
+anything (`platform`/`uname`):
+
+- **Apple-silicon Mac** — Python: the `mingxuan` conda env, ALWAYS —
   `/Users/mingxuanzhang/miniconda3/envs/mingxuan/bin/python` (torch+MPS,
   transformers, datasets, math-verify). Never create venvs.
-- Tests: `<that python> -m pytest tests/ -q` — keep it green; it is fast (~10s).
-- This machine is an Apple-silicon Mac: MPS + CPU only. THE trainer is
+- **Windows 11 desktop, RTX 5070 (12GB)** — THE CUDA box since 2026-07-20.
+  Native Windows cannot run the training stack (triton/TE/NCCL are
+  Linux-only): everything GPU runs inside the Docker container `minirl-mega`
+  (NGC image + mcore 0.18 + bridge 0.5, repo bind-mounted at
+  /workspace/miniRL; recipe + validated stack: docs/megatron.md §5a/§6).
+  Start Docker Desktop first, then:
+  `docker start minirl-mega`, and run things via
+  `docker exec -w /workspace/miniRL -e PYTHONPATH=/workspace/miniRL minirl-mega python ...`
+- Tests: `<that python> -m pytest tests/ -q` — keep it green; it is fast
+  (~10s Mac CPU; ~70s in the container, model-download tests included).
+- The Mac is MPS + CPU only. THE trainer is
   Megatron-Core (`minirl/megatron.py`, docs/megatron.md) and is CUDA-box-ONLY
   (megatron-core hard-imports triton; measured 2026-07-20). Local tests drive
   `tests/fake_trainer.py` — the demoted hand-written DDP trainer, now the
@@ -33,7 +45,10 @@ glossary (symbols, shapes, the four policies, notes/ symbol mapping) is
   stays on mingxuan) — spike findings + weight-update recipe:
   docs/async_tier2.md §8. (Packing was prototyped and rolled back for
   readability — docs/packing.md.)
-- Smoke recipe: `recipes/03_grpo_gsm8k.py` (GRPO on GSM8K, runs on MPS in ~2 min).
+- Smoke recipes (vLLM-only since 2026-07-20 — HFEngine/StreamAdapter and the
+  MPS recipe 03 are REMOVED): `recipes/04_smoke_vllm_cuda.py` (engine
+  validation) then `recipes/05_grpo_gsm8k_cuda.py` (GRPO on GSM8K), both
+  CUDA-box; on the Mac, vLLM = the vllm-metal venv.
 
 ## Conventions that are LAW here
 

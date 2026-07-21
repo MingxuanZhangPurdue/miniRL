@@ -7,7 +7,6 @@ import torch
 
 from minirl.config import CollectConfig
 from minirl.controllers import collect_groups_dp
-from minirl.engine import StreamAdapter
 from minirl.rewards import code_reward, extract_code, extract_final_answer, grade_answer, math_reward, run_python
 from minirl.rewards.math import extract_boxed
 from minirl.rollout.types import SamplingParams, Trajectory
@@ -96,20 +95,47 @@ SAMPLING2 = SamplingParams(max_new_tokens=2, n=2)
 CFG2 = CollectConfig(group_size=2, target_groups=2)
 
 
-class GenShim:
-    """generate()-duck-type around a plain closure, so a test 'engine' is one
-    lambda; StreamAdapter turns it into a streaming engine for the collector."""
+class StreamShim:
+    """Streaming-contract shim around a plain closure, so a test 'engine' is
+    one lambda; one poll finishes everything submitted (one poll == one round,
+    the semantics the retired StreamAdapter had)."""
 
     pad_id = 0
-    version = 0
 
     def __init__(self, fn):
         self.fn = fn
+        self.version = 0
+        self._pending: list[tuple[torch.Tensor, dict]] = []
+        self._stash: list[list[Trajectory]] = []
 
-    def generate(self, prompts, params):
-        return self.fn(prompts)
+    @property
+    def n_inflight(self) -> int:
+        return len(self._pending)
 
-    def load_weights(self, named_tensors, version):
+    def submit(self, prompt_ids, params, meta=None) -> str:
+        self._pending.append((prompt_ids, dict(meta or {})))
+        return f"req-{len(self._pending)}"
+
+    def poll(self) -> list[list[Trajectory]]:
+        out, self._stash = self._stash, []
+        for prompt, meta in self._pending:
+            group = self.fn([prompt])  # the closure yields ONE prompt's group
+            for t in group:
+                t.meta.update(meta)
+                t.version = self.version
+            out.append(group)
+        self._pending = []
+        return out
+
+    def stash(self, group: list[Trajectory]) -> None:
+        self._stash.append(group)
+
+    def drain(self) -> None:
+        while self._pending:
+            for group in self.poll():
+                self.stash(group)
+
+    def load_weights(self, named_tensors, version: int) -> None:
         self.version = version
 
 
@@ -133,7 +159,7 @@ def test_prompt_meta_reaches_reward_fn():
         seen.append(traj.meta["answer"])  # label arrived BEFORE reward ran
         return float(traj.input_ids[-1].item())
 
-    engine = StreamAdapter(GenShim(generate))
+    engine = StreamShim(generate)
     trajs, stats = collect_groups_dp([engine], reward_fn, prompt_source, CFG2, SAMPLING2)
     assert stats["groups"] == 2 and seen == ["20", "20", "21", "21"]
     assert trajs[0].meta["answer"] == "20" and trajs[2].meta["answer"] == "21"
@@ -150,7 +176,7 @@ def test_reward_fn_none_for_env_scored_episodes():
                 out.append(t)
         return out
 
-    engine = StreamAdapter(GenShim(generate))
+    engine = StreamShim(generate)
     trajs, _ = collect_groups_dp(
         [engine], None, lambda n: [torch.tensor([1])] * n,
         CollectConfig(group_size=2, target_groups=1), SAMPLING2,

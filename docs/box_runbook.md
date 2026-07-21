@@ -66,3 +66,17 @@ REMAINING. Written 2026-07-16, before the first box session.
 Known-unvalidated list this session retires: CUDA load_weights branch (1),
 EOS parity (1), gpu_id pinning (2), NCCL backend + broadcast at world 2 (4).
 Update DESIGN §0 + async_tier2 §7/§11 with findings afterwards.
+
+## 6. Megatron P1 parity — PASSED 2026-07-20, on a DIFFERENT box
+
+Not a RunPod rung: P1 (megatron.md §7) ran on the Windows 11 / RTX 5070
+home machine through Docker Desktop's WSL2 GPU passthrough — container
+recipe and the validated version stack are recorded in megatron.md §5a/§6
+(per the §6 rule that the environment is written down the day P1 passes).
+
+      docker exec -w /workspace/miniRL -e PYTHONPATH=/workspace/miniRL \
+          minirl-mega python recipes/08_megatron_p1_parity.py [--bf16]
+
+That box has ONE GPU: rungs 2-4 above (placement, 1x1 end-to-end, 2+2
+NCCL) still need this runbook's multi-GPU pod, as does Megatron P3 (DP>1).
+The 73-test CPU suite also passes inside the container (~70s).

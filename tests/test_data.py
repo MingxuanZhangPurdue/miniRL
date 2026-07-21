@@ -15,7 +15,7 @@ from minirl.data.prompts import HFPromptSource, gsm8k_row
 from minirl.data.sft import sft_batches
 
 # Override to vet a NEW model family's chat template + assistant masking:
-#   MINIRL_TEST_MODEL=org/name pytest tests/test_data.py tests/test_hf_engine.py
+#   MINIRL_TEST_MODEL=org/name pytest tests/test_data.py
 # (NOTE: the substring assertions in the mask tests assume a Qwen-style
 # template; a new family may need its own expected strings.)
 MODEL = os.environ.get("MINIRL_TEST_MODEL", "Qwen/Qwen3-0.6B")

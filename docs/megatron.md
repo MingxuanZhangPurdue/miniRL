@@ -1,6 +1,7 @@
 # Megatron trainer: replace our Trainer with Megatron-Core
 
-Status: design (2026-07-20), decision made — the hand-written DDP Trainer
+Status: P1 PASSED single-GPU (2026-07-20, Windows RTX 5070 box via Docker —
+§5a/§6/§7); decision made — the hand-written DDP Trainer
 (`minirl/train/trainer.py`, history in docs/ddp.md) will be REPLACED by
 Megatron-Core as the training engine. Rationale: after mirroring slime's
 conventions piece by piece (global denominators, fp32 masters, NaN guard,
@@ -171,6 +172,28 @@ torch itself (dynamo/inductor probe `triton.language.dtype`,
   on Mac CPU in seconds; trainer-math tests (masters, denominators) stay
   meaningful against the fake; Megatron parity is asserted on-box (§7 P1).
 
+## 5a. The box is a Windows machine (validated 2026-07-20)
+
+The first real box is a Windows 11 desktop (RTX 5070, 12GB, sm_120).
+Native Windows CANNOT run this stack (triton, transformer-engine and NCCL
+are all Linux-only) — the validated path is Docker Desktop's WSL2 GPU
+passthrough with the NGC PyTorch container; nvidia-smi works unchanged
+inside and CUDA runs at near-native speed. Container recipe (the repo is
+bind-mounted, so edits on Windows are live inside):
+
+    docker run -d --gpus all --name minirl-mega --shm-size 8g \
+        -v <repo>:/workspace/miniRL -v minirl-hf-cache:/root/.cache/huggingface \
+        -w /workspace/miniRL nvcr.io/nvidia/pytorch:26.03-py3 sleep infinity
+    docker exec -w /workspace/miniRL -e PYTHONPATH=/workspace/miniRL minirl-mega \
+        python recipes/08_megatron_p1_parity.py [--bf16]
+
+TWO TF32 TRAPS, both measured on this box: (a) NGC sets
+TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1, so "fp32" torch matmuls silently run
+TF32 (4.8e-2 matmul error vs 8.7e-5 true fp32) — fp32 parity work must
+disable torch.backends.*.allow_tf32; (b) TE GEMMs ignore those torch flags
+entirely — with the TE layer spec the "fp32" model carried 1.5e-3 mean
+logprob noise; the local layer spec (the §6 default anyway) is true fp32.
+
 ## 6. Environment (box) — slime's stack as reference (docker/Dockerfile)
 
     megatron-core            pinned (slime: git commit + patch; us: start
@@ -188,6 +211,25 @@ Version skew is THE failure mode of this stack (slime carries patch files
 against pinned commits). Rule: the box environment is recorded in the
 runbook the day P1 passes, and upgrades are their own runbook entries.
 
+VALIDATED P1 STACK (2026-07-20, the §5a box; the record the rule demands):
+
+    image                    nvcr.io/nvidia/pytorch:26.03-py3
+    torch                    2.11.0a0+...nv26.03 (container's own — untouched)
+    megatron-core            0.18.0  pip, PLAIN (no [dev,mlm] extras)
+    megatron-bridge          0.5.0   pip --no-deps — slime's trick is
+                             LOAD-BEARING upstream too: a plain install
+                             backtracks megatron-core to 0.13.1 and drags in
+                             ~100 packages (mlflow, comet, s3fs, flask, ...)
+    bridge runtime deps      omegaconf, hydra-core<=1.3.2, accelerate, peft,
+    (installed by hand)      diffusers, qwen-vl-utils, timm, mistral-common, wandb
+    nvidia-resiliency-ext    upgraded to >=0.6.0 (the container's 0.5.x makes
+                             `import megatron.core` raise at nvrx probing)
+    transformers             5.8.1 (bridge pin >=5.8.1,<5.9)
+    transformer-engine       2.13 preinstalled, UNUSED (local layer spec,
+                             see the §5a TF32 trap and use_te_layers)
+    numpy                    2.1.0 — the <2 requirement is GONE at mcore
+                             0.18 when the [dev,mlm] extras are skipped
+
 ## 7. Migration ladder
 
     P0  this doc.                                                 [done]
@@ -196,21 +238,49 @@ runbook the day P1 passes, and upgrades are their own runbook entries.
         demoted DDP trainer (tests/fake_trainer.py) on the same frozen
         batch (tolerances per precision doc), and logprob-shift parity
         (_ce_to_logprobs vs gather_logprobs) passes.
+        [PASSED 2026-07-20, recipes/08_megatron_p1_parity.py, §5a box.
+         MEASURED (fp32 leg, local layer spec, TF32 off): shift adapter
+         EXACT (0.0); logprobs mean 6.7e-6 / max 9.5e-5 nats; grad_norm
+         rel 4.1e-4; step-2 loss rel 2.4e-5, grad_norm rel 3.6e-4.
+         MEASURED (bf16 leg vs fp32 fake): step-1 grad_norm rel 3.6e-3;
+         logprobs mean 3.8e-2 nats (weight quantization on a random-token
+         batch, on top of precision.md §3's kernel band); step-2 parity is
+         UNDEFINED vs an fp32 reference — lr=1e-5 updates are sub-ulp for
+         bf16 params, so the spike asserts the sub-ulp signature instead
+         (mcore kl2 1.8 vs fake 32.8 on the same nominal step).]
     P2  minirl/megatron.py + controller wiring + recipe 05 on Megatron;
         trainer.py demoted to tests/fake_trainer.py.   [code built
-        2026-07-20 — UNVALIDATED until P1 runs on the box; written
-        against pinned source, banner lists the 3 conventions to check]
+        2026-07-20; single-GPU path VALIDATED by P1 the same day after
+        three integration fixes, listed in §8a]
     P3  DP>1 on the box (mcore DDP + distributed optimizer), publish
         gather sanity, wandb metrics parity with today's 05 recipe.
+        NOTE: the §5a box has ONE GPU — DP>1 and NCCL-at-world-2 need a
+        multi-GPU pod (the original box_runbook.md plan) or gloo smoke.
     P4  perf rungs, measured one at a time: TE layer spec, fused adam,
         grad_reduce_in_fp32 A/B, optional packing.
     P5  (door, not plan) tp=2 experiment to prove the config-only claim.
 
-Open questions parked until P1: exact megatron-core/bridge version pair
-that loads Qwen3-0.6B cleanly; whether bridge upstream suffices or slime's
-fork is load-bearing; dist_checkpointing vs bridge HF export for training
-resume (leaning bridge-export — HF-format checkpoints keep eval/serving
-trivial, matching slime's hf_checkpoint_saver).
+Open questions RESOLVED by P1 (2026-07-20): version pair = mcore 0.18.0 +
+bridge 0.5.0 (§6); upstream bridge SUFFICES — but only installed --no-deps,
+slime-style. Still parked: dist_checkpointing vs bridge HF export for
+training resume (leaning bridge-export); bridge deprecation warning says
+ModelProviderMixin gives way to ModelConfig + ModelBuilder — our provide()
+adapter (§8a) will need revisiting when the pin moves past 0.5.
+
+## 8a. Bridge 0.5.0 integration findings (measured 2026-07-20)
+
+Three fixes were needed to drive the bridge from OUR init path (we own
+parallel_state init; we never call provider.provide_distributed_model):
+
+    1. provider.provide() reads PP/TP roles off provider._pg_collection and
+       only provide_distributed_model sets it -> we set it ourselves from
+       the mpu groups (ProcessGroupCollection.use_mpu_process_groups()).
+    2. to_megatron_provider(load_weights=True) only PARKS the weight copy
+       in a pre-wrap hook consumed by provider.get_model() -> the explicit
+       path must call bridge.load_hf_weights([model]) itself. Failure mode
+       when skipped is SILENT: zero embeddings, CE == log|V| uniform.
+    3. dtype must be forced BOTH ways (provider inherits the checkpoint's
+       bf16) -> fp32 runs need params_dtype/bf16/fp16 explicitly set.
 
 ## 8. How slime drives Megatron (reference walkthrough, ../slime)
 

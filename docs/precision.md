@@ -21,7 +21,7 @@ correctness invariants** so no config combination can silently break training.
 
 | Component | dtype | Where specified |
 |---|---|---|
-| Rollout engine compute (vLLM / HFEngine) | **bf16** CUDA, **fp32** MPS/CPU | knob 1: `HFEngine(dtype=...)` / `VLLMEngine(dtype=...)`; auto-picked per device (engine/hf_engine.py already does this) |
+| Rollout engine compute (vLLM) | **bf16** CUDA, **fp32** MPS/CPU | knob 1: `VLLMEngine(dtype=...)` (HFEngine, which auto-picked per device, was removed 2026-07-20 — vLLM-only) |
 | Learner forward/backward (weights-as-computed, activations, local grads) | **bf16** CUDA, **fp32** MPS/CPU | knob 2: `TrainConfig.bf16_weights` (Megatron-style: bf16 params + fp32 master copies in AdamW; grads reduce in bf16 — the one deviation from Megatron, which accumulates/all-reduces grads in fp32) — built 2026-07-20; an autocast variant (fp32 params, bf16 compute) existed briefly and was removed 2026-07-19: slime/Megatron ship exactly one mode. Dev path = fp32 end to end |
 | Checkpoints at rest (`save_pretrained`) | **bf16** (HF convention) | knob 3: `train.checkpoint_dtype` |
 | Master weights (what the optimizer updates) | **fp32**, always | hardcoded. bf16 has ~0.4% relative resolution: a `lr·grad ~ 1e-6` update rounds to zero (`1 + 1e-6 == 1` in bf16) and learning silently stops |
@@ -37,8 +37,10 @@ Per-device defaults, resolved automatically:
 
 - **CUDA**: rollout bf16 · learner compute bf16 · master/optimizer/reductions fp32 · checkpoints bf16.
 - **MPS/CPU (dev path)**: fp32 end-to-end — MPS bf16 is unreliable, the 0.6B
-  model fits, and exactness is the point (it is what makes HFEngine a ~1e-5
-  oracle against the learner). fp16 is never used: its 5-bit exponent needs
+  model fits, and exactness is the point (a raw fp32 HF forward is a ~1e-5
+  logprob oracle against the learner — the check recipe 04 §3 runs on-box;
+  it was HFEngine's job until the 2026-07-20 vLLM-only removal). fp16 is
+  never used: its 5-bit exponent needs
   loss-scaling machinery (GradScaler) that bf16 makes obsolete.
 
 ## 3. The three-copies-of-π consequence
@@ -98,5 +100,5 @@ train:
 ```
 
 Tests that pin the invariants: gather_logprobs-vs-F.cross_entropy in fp32;
-HFEngine logprob round-trip (< 1e-3); engine-vs-learner gap tolerance for
-vLLM (DESIGN §6.0); microbatch gradient-equivalence (fp32 accumulation).
+engine-vs-learner gap tolerance for vLLM against a raw fp32 HF forward
+(recipe 04 §3, on-box); microbatch gradient-equivalence (fp32 accumulation).

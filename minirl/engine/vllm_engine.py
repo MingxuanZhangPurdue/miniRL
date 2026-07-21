@@ -10,8 +10,8 @@ One interface: the streaming contract — submit() / poll() / stash() /
 drain() / n_inflight / load_weights / pad_id — consumed by
 controllers/fully_async.py (collect_groups_dp drives poll() directly).
 (A blocking tier-1 generate() existed until 2026-07-16; it retired with the
-round-based controller — generate()-style engines now enter via
-engine/stream_adapter.py instead.)
+round-based controller. The generate()-engine on-ramp — HFEngine +
+StreamAdapter — retired 2026-07-20 with the vLLM-only decision.)
 
 IN-FLIGHT UPDATES ARE DEFERRED (decision 2026-07-10):
 load_weights REQUIRES a quiescent engine (drain-then-publish, asserted), so
@@ -27,9 +27,10 @@ Platform notes (spike findings):
     (no custom worker code; see load_weights). The previous custom callable
     passed the rung-1 canary 2026-07-20; the native path needs one rerun of
     recipes/04_smoke_vllm_cuda.py to re-validate.
-  - EOS parity with HFEngine (response INCLUDES its eos token) must be
-    verified on the first real run — vLLM configs differ on stop-token
-    inclusion. gsm8k smoke vs HFEngine is the check.
+  - EOS parity (response INCLUDES its eos token — the loss-mask convention
+    the trainer assumes, rollout/types.py) must be verified on the first
+    real run — vLLM configs differ on stop-token inclusion.
+    recipes/04_smoke_vllm_cuda.py is the check (PASSED A100 2026-07-20).
 
 vLLM imports live inside methods so this module imports cleanly in
 environments without vLLM (the repo test env); instantiating needs the vLLM
@@ -210,7 +211,7 @@ class VLLMEngine:
         # are aliases, and safetensors refuses aliased tensors (found on the
         # A100 box 2026-07-20; the Mac never saw it — MPS->CPU moves broke the
         # aliasing by copying). Loaders re-tie on their side: vLLM skips
-        # lm_head for tied configs, HFEngine loads with strict=False.
+        # lm_head for tied configs.
         tensors: dict[str, Tensor] = {}
         seen: set[int] = set()
         for k, v in named_tensors:

@@ -73,6 +73,10 @@ class MegatronTrainConfig:
     seed: int = 0  # minibatch shuffling (identical on every rank by the same seed)
     bf16: bool = True  # Megatron's one precision mode: bf16 params + fp32 masters
     grad_reduce_in_fp32: bool = True  # full-Megatron grad fidelity (the fake reduces in bf16)
+    use_te_layers: bool = False  # False = get_gpt_layer_local_spec (plain-torch modules,
+    #   megatron.md §6: TE spec is a later perf rung). TE also runs fp32 GEMMs
+    #   as TF32 regardless of torch.backends flags — measured 2026-07-20,
+    #   1.5e-3 mean logprob noise vs the fake trainer in "fp32"; local is exact.
     use_distributed_optimizer: bool = True  # shard optimizer states across DP (ZeRO-1 style)
     # The door, not the plan: parallelism is config here, never code.
     tensor_parallel: int = 1
@@ -121,11 +125,31 @@ class MegatronTrainer:
         provider = self.bridge.to_megatron_provider(load_weights=True)
         provider.tensor_model_parallel_size = cfg.tensor_parallel
         provider.pipeline_model_parallel_size = cfg.pipeline_parallel
-        if cfg.bf16:
-            provider.bf16 = True
-            provider.params_dtype = torch.bfloat16
+        # dtype is FORCED both ways: the provider inherits the HF checkpoint's
+        # dtype (bf16 for Qwen releases), so fp32 runs need the override too —
+        # measured 2026-07-20: bf16=False alone silently kept bf16 params under
+        # an fp32-configured optimizer.
+        provider.bf16 = cfg.bf16
+        provider.fp16 = False
+        provider.params_dtype = torch.bfloat16 if cfg.bf16 else torch.float32
+        if not cfg.use_te_layers:
+            from megatron.bridge.models.gpt_provider import local_layer_spec
+
+            provider.transformer_layer_spec = local_layer_spec
         provider.finalize()
+        # bridge >= 0.5 providers read PP/TP roles off self._pg_collection and
+        # only their (deprecated) provide_distributed_model sets it; we build
+        # the model ourselves, so hand them the mpu groups we just initialized.
+        from megatron.core.process_groups_config import ProcessGroupCollection
+
+        provider._pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.model = provider.provide().cuda()  # the raw GPTModel
+        # to_megatron_provider(load_weights=True) only PARKS the HF->mcore
+        # weight copy in a pre-wrap hook consumed by provider.get_model();
+        # the explicit provide() path must run the load itself (measured
+        # 2026-07-20: skipping this yields a zero-embedding model whose CE is
+        # exactly log|V| — uniform logits, silently "training" from scratch).
+        self.bridge.load_hf_weights([self.model])
 
         self.ddp = DistributedDataParallel(
             config=self.model.config,

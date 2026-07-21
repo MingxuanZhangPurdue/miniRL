@@ -2,10 +2,9 @@
 
 One controller serves every async configuration on a single node:
 
-    k=1 StreamAdapter(HFEngine), world=1   the Mac/MPS dev path (one poll ==
-                                           one round: the retired round_based
-                                           controller as a degenerate case)
     k=1 VLLMEngine, world=1                tier-2 continuous batching
+                                           (the smallest real configuration;
+                                           CPU tests use FakeStreamEngine)
     k>1 VLLMEngines, world>=1              DP rollout fleet (dealer + tally)
     world>1 (torchrun; DDP auto-engages)   rank 0 collects + broadcasts;
                                            followers train + join publishes

@@ -7,7 +7,7 @@ Executes the async_tier2.md §7 on-box checklist items in order, fail-loud:
   1. streaming contract: submit/poll/drain on real vLLM (n=G grouping,
      sampled logprobs attached, version stamping)
   2. EOS parity: every finished response INCLUDES its eos token — the
-     HFEngine convention the trainer's loss masks assume
+     loss-mask convention the trainer assumes (rollout/types.py)
   3. engine<->learner logprob gap: mean/max |logpi_engine - logpi_learner|
      on the same tokens must sit inside TIS's clamp band (fp32 HF reference)
   4. weight-update canary (the §8 perturb-restore, CUDA branch this time):
@@ -70,7 +70,7 @@ def main() -> None:
     for t in finished:
         assert int(t.input_ids[-1]) in eos_ids, (
             f"finished response does not END with eos (last={int(t.input_ids[-1])}) — "
-            "vLLM stop-token inclusion differs from HFEngine; fix engine config before training"
+            "stop-token inclusion violates the loss-mask convention; fix engine config before training"
         )
     print(f"   PASS: {len(finished)}/{len(group)} finished responses include their eos")
 

@@ -27,11 +27,11 @@ implicit.
 | `b` | rows of ONE microbatch slice under gradient accumulation (`b <= B`) |
 | `T` | padded prompt+completion length — the token axis of every trainer-side tensor. One row's own T = `prompt_len + response_len`; a `Batch`'s T = the max over its rows (right-padded) |
 | `prompt_len`, `response_len` | one `Trajectory`'s split of its T (properties on `Trajectory`; the response INCLUDES its EOS token) |
-| `T_max` | ENGINE-side: padded prompt length of a generation batch — prompts left-padded to the longest (hf_engine.py) |
+| `T_max` | ENGINE-side: padded prompt length of a generation batch — prompts left-padded to the longest (an engine-internal concern; vLLM handles it) |
 | `T_gen` | ENGINE-side: the generated-token axis, `<= max_new_tokens`; pad-filled past each row's EOS, trimmed (EOS-inclusive) before becoming a `Trajectory` |
 | `max_new_tokens` | the generation budget (`SamplingParams`) — also the value to pass as Dr. GRPO's constant `C` |
 | `\|y_i\|` | completion i's real response-token count = `loss_mask[i].sum()` = its `response_len` |
-| `V` | vocabulary size (~152k for Qwen3) — why logprobs are gathered per step, never as a `(B, T, V)` buffer (hf_engine.py) |
+| `V` | vocabulary size (~152k for Qwen3) — why logprobs are gathered per step, never as a `(B, T, V)` buffer |
 
 Shape comments read: `(B, T)` per-token over the batch, `(B,)` per-sequence,
 `(P,)` per-group internals (advantage.py only), `(T,)` one `Trajectory`,

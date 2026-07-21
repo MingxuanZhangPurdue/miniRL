@@ -4,9 +4,10 @@ A minimal, pure-PyTorch post-training laboratory for small open-source LLMs —
 **model-agnostic by construction**: nothing in the stack knows the
 architecture; everything keys off one HF `model.name_or_path`, and trying a
 new family is a checkpoint string plus a test run
-(`MINIRL_TEST_MODEL=org/name pytest tests/test_hf_engine.py tests/test_data.py`
-— the engine-contract and chat-mask tests are the two model-sensitive spots,
-and both carry loud guards). Current default/starting point: **Qwen3-0.6B** —
+(`MINIRL_TEST_MODEL=org/name pytest tests/test_data.py` — the chat-mask
+tests are the model-sensitive spot and carry loud guards; the engine side is
+vetted on-box by `recipes/04_smoke_vllm_cuda.py`). Current default/starting
+point: **Qwen3-0.6B** —
 a boring, standard dense transformer (GQA/RoPE/RMSNorm) with first-class vLLM
 support and abundant community RLVR baselines to sanity-check against. More
 small families get added by trying them; exotic architectures (e.g. the
@@ -19,27 +20,33 @@ that together form a miniature version of production frameworks like
 
 ## 0. Status (updated 2026-07-14 — keep this section current)
 
-**Built and tested (71 passing tests, all CPU/MPS):** the full RLVR stack —
-`HFEngine` (rollouts on any device, exact behavior logprobs) + `VLLMEngine`
-(continuous batching; Metal weight-update recipe validated, CUDA branch
-awaits the box) + `StreamAdapter` (generate()-only engines speak the
-streaming contract; one poll == one round), losses grpo/gspo/cispo/sft as
+**Built and tested (67 passing tests, all CPU/MPS):** the full RLVR stack —
+`VLLMEngine`, THE rollout engine (vLLM-only decision 2026-07-20: HFEngine
+and its StreamAdapter REMOVED — the streaming contract is now pinned by
+tests/test_fully_async.py's FakeStreamEngine, and the fp32-oracle duty
+lives in recipe 04's raw HF forward; continuous batching; Metal
+weight-update recipe validated, CUDA smoke PASSED 2026-07-20), losses
+grpo/gspo/cispo/sft as
 files + dapo/dr_grpo as named configs (`LOSSES` registry, algos/README.md),
 group advantages with pluggable `advantage_fn`, TIS, the three-mode reduce
 (`loss_agg`), `make_batch`, **the Megatron trainer** (`minirl/megatron.py`,
 built 2026-07-20 per docs/megatron.md — Megatron-Core owns fwd/bwd,
 DDP+fp32 grad reduce, bf16+fp32-master optimizer; Megatron-Bridge builds
 the model from the HF name and exports HF-named weights for publish; our
-losses plug in via the forward_step socket; CUDA-box-only, P1 parity run
-still pending. The hand-written trainer it replaced — DDP merged
+losses plug in via the forward_step socket; CUDA-box-only, **P1 parity
+PASSED single-GPU 2026-07-20** (recipes/08_megatron_p1_parity.py on the
+Windows RTX 5070 box via Docker/WSL2, megatron.md §5a/§7: fp32 leg exact to
+1e-4-tier, bf16 leg in-band; three bridge-0.5.0 integration fixes in §8a).
+The hand-written trainer it replaced — DDP merged
 2026-07-16, ddp.md §7; FSDP2 before that, fsdp2.md — is DEMOTED to
 `tests/fake_trainer.py`: the executable spec of the trainer contract that
 the local suite drives on CPU), **wandb
-metric logging** (`minirl/logging.py`; wandb lives ONLY in recipes; recipe 03
+metric logging** (`minirl/logging.py`; wandb lives ONLY in recipes; recipe 05
 wires it behind `--wandb`), rewards (GSM8K math verifier + level-2 code
 sandbox), the data layer (chat templating with assistant-mask, HF prompt
-sources, SFT batching), a working GSM8K GRPO recipe
-(`recipes/03_grpo_gsm8k.py`, smoke-tested on MPS end to end), and **THE
+sources, SFT batching), the GSM8K GRPO recipe
+(`recipes/05_grpo_gsm8k_cuda.py`; the MPS recipe 03 was REMOVED 2026-07-20
+with HFEngine — vLLM-only), and **THE
 fully-async controller** (2026-07-14 consolidation, docs/async_tier2.md
 §10-§11: `controllers/fully_async.py` — fit_async + collect_groups_dp; k DP
 engines via shared dealer/tally with burst-capped deals, one owner thread
@@ -56,11 +63,9 @@ vllm-metal smoke (EOS parity + weight canary), per-engine GPU pinning spike
 parity, logprob gap; findings: EngineCore fork->spawn, tied-weight dedupe, V1
 n>1 fan-out is ours now).
 
-**Decided and documented, not yet built:** **the Megatron P1 box spike
-(docs/megatron.md §7 — the P2 code is built and locally green, but the
-loss/grad_norm parity vs tests/fake_trainer.py on a frozen batch and the
-three integration conventions in minirl/megatron.py's banner are
-UNVALIDATED until it runs on CUDA)**, the sync controller
+**Decided and documented, not yet built:** **Megatron P3 (DP>1 + publish
+gather + recipe-05 wandb parity — needs a multi-GPU pod; the P1 box has one
+GPU)**, the sync controller
 (`controllers/sync.py` — collect -> train -> publish via collect_groups_dp,
 no overlap), in-flight weight updates (DEFERRED by decision 2026-07-10 —
 docs/async_tier2.md §4), NCCL weight sync (need the CUDA box;
@@ -113,9 +118,10 @@ Reference codebases and study resources:
    exception is the **rollout backend**: `vLLM` is the primary inference engine
    (see §6.0), because rollouts dominate RL wall-clock and because integrating
    a foreign engine — weight sync, logprob mismatch — is itself core RL-infra
-   curriculum, not incidental complexity. An `HFEngine` (thin `model.generate`
-   wrapper) is kept alongside it as the reference backend so the whole
-   pipeline also runs on Apple MPS / CPU. Remaining dependencies:
+   curriculum, not incidental complexity. vLLM is the ONLY engine
+   (2026-07-20 decision; the HFEngine reference backend was removed then —
+   on the Mac, vLLM runs via the vllm-metal venv, and the CPU test suite
+   drives contract fakes). Remaining dependencies:
    `transformers` (model architecture + loading, see principle 2), `datasets`
    (download data), `pyyaml`, optionally `wandb`.
 2. **The model comes from HF; the checkpoint is the single source of truth.**
@@ -214,14 +220,10 @@ miniRL/
 │   │   │                        #   weight updates via callable RPC + safetensors path
 │   │   │                        #   (Metal recipe validated, CUDA branch awaits box;
 │   │   │                        #   docs/async_tier2.md §8); Mac: vllm-metal venv
-│   │   ├── hf_engine.py         # REFERENCE backend: HFEngine wraps batched
-│   │   │                        #   model.generate on its own HF model copy;
-│   │   │                        #   returns exact sampling logprobs; runs on
-│   │   │                        #   CUDA / MPS / CPU — the local-dev + CI path
-│   │   ├── stream_adapter.py    # [done] StreamAdapter: generate()-only engine ->
-│   │   │                        #   streaming contract; one poll == one ROUND (the
-│   │   │                        #   retired tier 1 as an engine property, §11)
-│   │   └── README.md            # when to use which; the logprob-mismatch story
+│   │   │                        # (hf_engine.py + stream_adapter.py REMOVED
+│   │   │                        #   2026-07-20 — vLLM-only; the streaming
+│   │   │                        #   contract's executable spec is the fake in
+│   │   │                        #   tests/test_fully_async.py)
 │   │
 │   ├── data/                    # HF `datasets` does loading/caching/splits — we only
 │   │   │                        #   turn rows into the 3 shapes the repo already defines.
@@ -317,14 +319,16 @@ miniRL/
 ├── recipes/                     # end-to-end runnable experiments (the "model flow")
 │   ├── 01_sft.py                # (planned)
 │   ├── 02_dpo.py                # (planned)
-│   ├── 03_grpo_gsm8k.py         # [done] RLVR on math, Mac/MPS smoke (already async:
-│   │                            #   fit_async with StreamAdapter(HFEngine), k=1)
+│   │                            # (03_grpo_gsm8k.py, the Mac/MPS HFEngine smoke,
+│   │                            #   REMOVED 2026-07-20 — vLLM-only)
 │   ├── 04_smoke_vllm_cuda.py    # [done, needs box] on-box engine validation ladder:
 │   │                            #   contract / EOS parity / logprob gap / weight canary
 │   ├── 05_grpo_gsm8k_cuda.py    # [done, needs box] k vLLM engines x m DDP ranks via
 │   │                            #   torchrun + PlacementConfig (docs/box_runbook.md)
 │   ├── 06_agentic_tooluse.py    # (planned) multi-turn tool-use RL
-│   └── 07_onpolicy_distill.py   # (planned) MOPD-lite from a larger teacher
+│   ├── 07_onpolicy_distill.py   # (planned) MOPD-lite from a larger teacher
+│   └── 08_megatron_p1_parity.py # [done 2026-07-20] Megatron-vs-fake_trainer parity
+│                                #   on a frozen batch (megatron.md §7 P1, §5a box)
 │
 ├── configs/                     # one YAML per experiment
 │   ├── sft_qwen06b.yaml
@@ -428,18 +432,11 @@ one config field (`rollout.backend: vllm | hf`).
   same paths TRL and open-instruct use), `sleep()`/`wake_up()` to free KV-cache
   memory in colocated mode. This mirrors verl's vLLM rollout worker and plays
   the role SGLang plays for slime.
-- **`HFEngine` (reference)** — batched `model.generate` on the *same* HF
-  module class as the learner, returning exact sampling logprobs. Slow but
-  runs on CUDA, Apple MPS, and CPU — the local-dev and CI path (develop the
-  whole pipeline on a Mac, run real experiments on the GPU box), and the
-  trusted oracle when debugging vLLM integration: since it shares the
-  learner's module, its logprob gap vs the learner is near zero by
-  construction, isolating vLLM-specific numerics.
-  (MPS notes, recorded in `hf_engine.py`: prefer fp32/fp16 over bf16;
-  set `PYTORCH_ENABLE_MPS_FALLBACK=1`. Logprob gotcha, verified empirically:
-  use `generate(..., output_logits=True)` for behavior logprobs — `output_scores`
-  returns post-temperature/top-p logits and inflates the engine↔learner gap
-  from ~1e-5 to ~0.8 nats/token.)
+- (An `HFEngine` reference backend — batched `model.generate`, any device —
+  existed until 2026-07-20; REMOVED with the vLLM-only decision. Its oracle
+  duty — a trusted fp32 logprob reference isolating vLLM-specific numerics —
+  survives as recipe 04's raw `AutoModelForCausalLM` forward, which needs no
+  engine machinery. Its MPS/generate() gotchas are preserved in git history.)
 
 **The logprob-mismatch experiment (first-class, not a footnote).** vLLM's
 kernels, paged attention, and bf16 numerics produce sampling logprobs that
@@ -518,9 +515,7 @@ Built in two tiers, mirroring slime (full study + design: docs/async_training.md
   the learner is the HF module, no name translation is ever needed. Streaming
   per tensor (bucketed) avoids a full-model memory spike. Gotchas handled
   here: tied embeddings (don't sync `lm_head` separately when
-  `tie_word_embeddings=True`). The `HFEngine` path is a plain
-  `load_state_dict` — no remapping; CPU/MPS falls back to shared-memory
-  tensors.
+  `tie_word_embeddings=True`).
   Workers pick up new weights between episodes — mid-episode weight switching
   is off by default but available as a config flag, since it's a real
   design axis in GLM-5's async agentic RL.
@@ -594,7 +589,7 @@ RLVR recipe, and DPO are done. The essentials:
 
 **Config** (`config.py`): nested dataclasses (`ModelCfg`, `DataCfg`, `OptimCfg`,
 `AlgoCfg`, `RolloutCfg`, `AsyncCfg`), loaded from YAML with dot-path CLI
-overrides (`python recipes/03_grpo_gsm8k.py --cfg configs/grpo_gsm8k.yaml
+overrides (`python recipes/05_grpo_gsm8k_cuda.py --cfg configs/grpo_gsm8k.yaml
 optim.lr=2e-6 algo.kl_coef=0.0`). Every run dumps its resolved config next to
 its checkpoints.
 
@@ -607,7 +602,8 @@ tokens/sec for engine and learner separately.
 **Tests** (`tests/`) — correctness over coverage:
 - `gather_logprobs` against `F.cross_entropy` (and: logits upcast to fp32
   before `log_softmax` — bf16 logprobs are noisy enough to corrupt ratios).
-- HFEngine sampling logprobs == learner recomputed logprobs (fp32, greedy).
+- Engine sampling logprobs vs a raw fp32 HF forward: on-box, recipe 04 §3
+  (the in-repo HFEngine round-trip test retired with HFEngine, 2026-07-20).
 - Checkpoint round-trip: `save_checkpoint` output loads via both
   `AutoModelForCausalLM.from_pretrained` and `vllm.LLM`.
 - VLLMEngine vs learner logprob gap stays under a documented tolerance on a
@@ -627,7 +623,7 @@ real frameworks. This table is the contract; keep it updated as code lands.
 |---|---|---|---|
 | Overall dataflow owner | `rollout/controller.py` — a plain `fit()` loop that calls generate → reward → advantage → update | `train.py` driver over Ray actors | **single-controller**: `RayPPOTrainer.fit()` driving worker groups |
 | Data protocol between stages | `rollout/types.py` (`Trajectory`, `Batch`) | `Sample` dataclass flowing through the buffer | `DataProto` (tensordict + meta) passed between workers |
-| Rollout backend | duck-typed engines: `VLLMEngine` (primary, CUDA) or `HFEngine` (reference, any device) | SGLang server(s) behind a router | vLLM/SGLang rollout workers inside `ActorRolloutRefWorker` |
+| Rollout backend | `VLLMEngine`, duck-typed streaming contract (vLLM-only) | SGLang server(s) behind a router | vLLM/SGLang rollout workers inside `ActorRolloutRefWorker` |
 | Training backend | `minirl/megatron.py` (Megatron-Core, DP-only config) | Megatron-LM actor | FSDP / Megatron actor workers |
 | Actor / rollout placement | `rollout/placement.py`: **colocated vs disaggregated** GPU assignment on one node | **colocated vs disaggregated** modes on GPU groups | **hybrid engine**: actor & rollout share GPUs, offload/reload between phases |
 | Weight sync learner → sampler | `rollout/weight_sync.py`: versioned NCCL broadcast (shm fallback on CPU) | bucketed NCCL broadcast (disaggregated) or CUDA IPC (colocated) | `sync_model_weights` / resharding between FSDP and vLLM formats |
@@ -691,8 +687,8 @@ e.g. async landed before SFT, sync-controller and PPO rows are superseded.)
   paths, not code; multi-language at scale = a sandbox service (SandboxFusion)
   behind the remote_rm pattern.
 - No *building* serving-grade inference (paged attention, speculative decoding,
-  CUDA graphs) — that's what the vLLM dependency is for; our `HFEngine` stays
-  a thin `model.generate` wrapper. If you later want to *learn* inference
+  CUDA graphs) — that's what the vLLM dependency is for; we keep vLLM fed,
+  never reimplement it. If you later want to *learn* inference
   internals, writing a KV-cache sampler from scratch is a natural side quest,
   but it is not on this repo's critical path.
 - No 3D parallelism (TP/PP) / MoE / multi-node — a DDP learner group plus
