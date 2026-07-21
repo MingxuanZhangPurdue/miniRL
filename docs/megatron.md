@@ -16,9 +16,15 @@ is actually about:
     datasets / prompts / rewards        fused kernels, activation ckpt
     agentic runner, eval                TP / PP / CP / EP when ever needed
 
-We will run **DP-only** (tp=pp=cp=ep=1) for the foreseeable future, but we
-go through Megatron's real interfaces so that parallelism is a config
-change, not a rewrite. This is the same bet slime makes; their integration
+We run **DP-only** (tp=pp=cp=ep=1) — since 2026-07-20 HARDWIRED, not
+config: the tensor_parallel/pipeline_parallel fields were removed from
+MegatronTrainConfig (user decision — an unvalidated knob is a trap, and PP
+would not even work: compute_logprobs calls the model directly, a pp=1
+assumption). The door stays ARCHITECTURAL: everything still goes through
+Megatron's real interfaces (parallel_state, the fwd_bwd schedule,
+vocab-parallel CE), so re-opening TP is re-adding two config fields plus
+the P5 validation run, not a rewrite. This is the same bet slime makes;
+their integration
 (slime/backends/megatron_utils/) is the reference implementation for
 everything below, and Megatron-LM is cloned at ../Megatron-LM.
 
@@ -273,7 +279,8 @@ VALIDATED P1 STACK (2026-07-20, the §5a box; the record the rule demands):
         layer spec rung was pulled forward: default-on since 2026-07-20
         (user decision; bf16 parity bands re-verified on TE the same day —
         the tokens/sec A/B vs local remains unmeasured).
-    P5  (door, not plan) tp=2 experiment to prove the config-only claim.
+    P5  (door, not plan) tp=2 experiment — re-add the tp/pp config fields
+        (removed 2026-07-20, §0) and prove the interfaces-only claim.
 
 Open questions RESOLVED by P1 (2026-07-20): version pair = mcore 0.18.0 +
 bridge 0.5.0 (§6); upstream bridge SUFFICES — but only installed --no-deps,

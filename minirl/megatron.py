@@ -1,9 +1,8 @@
 """THE trainer: Megatron-Core drives training; this module is the whole
 integration. CUDA-box ONLY — megatron-core hard-imports triton (no macOS
-build), so this MODULE only imports on the box (imports are file-level by
-decision 2026-07-20; only the box recipes 05/08 import it) and the local
-test suite drives tests/fake_trainer.py (the executable spec of the same
-contract) instead.
+build), so this MODULE only imports on the box (only the box recipes import
+it) and the local test suite drives tests/fake_trainer.py (the executable
+spec of the same contract) instead.
 
 The trainer duck-type consumed by controllers/fully_async.py:
 
@@ -87,18 +86,8 @@ class MegatronTrainConfig:
     seed: int = 0  # minibatch shuffling (identical on every rank by the same seed)
     bf16: bool = True  # Megatron's one precision mode: bf16 params + fp32 masters
     grad_reduce_in_fp32: bool = True  # full-Megatron grad fidelity (the fake reduces in bf16)
-    use_te_layers: bool = True  # Transformer-Engine layer spec — fused kernels +
-    #   FlashAttention/cuDNN attention dispatch; the TRAINING default (user
-    #   decision 2026-07-20, validated same day: bf16 parity bands hold on TE).
-    #   False = get_gpt_layer_local_spec (plain-torch modules) — the fp32
-    #   parity/debug path: TE runs fp32 GEMMs as TF32 regardless of
-    #   torch.backends flags (measured 2026-07-20: 1.5e-3 mean logprob noise
-    #   in "fp32"; local is exact to 1e-4-tier). Rule: train TE+bf16, debug
-    #   local+fp32.
+    use_te_layers: bool = True  # Transformer-Engine layer spec — fused kernels + FlashAttention/cuDNN attention dispatch
     use_distributed_optimizer: bool = True  # shard optimizer states across DP (ZeRO-1 style)
-    # The door, not the plan: parallelism is config here, never code.
-    tensor_parallel: int = 1
-    pipeline_parallel: int = 1
 
 
 class MegatronTrainer:
@@ -118,23 +107,20 @@ class MegatronTrainer:
         self.loss_agg = getattr(loss_cfg, "loss_agg", "token_mean")
 
         if not parallel_state.model_parallel_is_initialized():
-            parallel_state.initialize_model_parallel(cfg.tensor_parallel, cfg.pipeline_parallel)
+            parallel_state.initialize_model_parallel(1, 1)  # DP-only, hardwired
         model_parallel_cuda_manual_seed(cfg.seed)
-        # dp coordinates, not global ones: identical at tp=pp=1, and the
-        # slicing/publish logic keys off DP replicas by meaning either way.
+        # dp coordinates by meaning (== global ones at tp=pp=1): the
+        # slicing/publish logic keys off DP replicas.
         self.rank = parallel_state.get_data_parallel_rank()
         self.world = parallel_state.get_data_parallel_world_size()
 
         # HF checkpoint -> mcore GPTModel, weights loaded, in one call chain.
         # The bridge is KEPT: it is also the publish exporter (HF naming).
         self.bridge = AutoBridge.from_hf_pretrained(model_name_or_path)
-        provider = self.bridge.to_megatron_provider(load_weights=True)
-        provider.tensor_model_parallel_size = cfg.tensor_parallel
-        provider.pipeline_model_parallel_size = cfg.pipeline_parallel
+        provider = self.bridge.to_megatron_provider(load_weights=True)  # tp=pp=1 provider defaults
         # dtype is FORCED both ways: the provider inherits the HF checkpoint's
-        # dtype (bf16 for Qwen releases), so fp32 runs need the override too —
-        # measured 2026-07-20: bf16=False alone silently kept bf16 params under
-        # an fp32-configured optimizer.
+        # dtype (bf16 for Qwen releases), so bf16=False alone would silently
+        # keep bf16 params under an fp32-configured optimizer.
         provider.bf16 = cfg.bf16
         provider.fp16 = False
         provider.params_dtype = torch.bfloat16 if cfg.bf16 else torch.float32
@@ -148,9 +134,9 @@ class MegatronTrainer:
         self.model = provider.provide().cuda()  # the raw GPTModel
         # to_megatron_provider(load_weights=True) only PARKS the HF->mcore
         # weight copy in a pre-wrap hook consumed by provider.get_model();
-        # the explicit provide() path must run the load itself (measured
-        # 2026-07-20: skipping this yields a zero-embedding model whose CE is
-        # exactly log|V| — uniform logits, silently "training" from scratch).
+        # the explicit provide() path must run the load itself. Skipping it
+        # fails SILENTLY: a zero-embedding model whose CE is exactly log|V|
+        # (uniform logits), "training" from scratch.
         self.bridge.load_hf_weights([self.model])
 
         self.ddp = DistributedDataParallel(

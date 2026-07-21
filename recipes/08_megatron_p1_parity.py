@@ -178,9 +178,8 @@ def main() -> None:
         # step-2 parity vs an fp32 reference is UNDEFINED in bf16: the lr=1e-5
         # update is sub-ulp for most bf16 params, so mcore's forward weights
         # lag its fp32 masters while the fake's fp32 weights take the full
-        # step — different theta_2 by construction, not by bug (the fake's
-        # own test_bf16_weights_preserves_sub_ulp_updates pins this). Assert
-        # the SIGNATURE of that semantics instead: mcore drifted far less.
+        # step — different theta_2 by construction, not by bug. Assert the
+        # SIGNATURE of that semantics instead: mcore drifted far less.
         ok = got["kl2"] < ref["kl2"]
         print(f"  {'PASS' if ok else 'FAIL'}  bf16 sub-ulp signature (mcore kl2 << fp32 fake kl2)")
         if not ok:

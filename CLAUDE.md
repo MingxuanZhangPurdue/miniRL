@@ -67,3 +67,8 @@ anything (`platform`/`uname`):
 5. Loss functions return UNREDUCED (B, T) maps; the trainer reduces ONCE
    (`loss_agg`); denominators are minibatch-global. Trajectories/batches live
    on CPU; fp32 for logprob math (docs/precision.md).
+6. **Every comment in code exists to help a reader understand the code —
+   nothing else.** Not for provenance (dates, "measured on...", decisions,
+   change history), not for docs/*.md § cross-references, not for pointing
+   at tests. All of that lives in docs/ and git history. (Older comments
+   predate this rule; don't churn them, but don't imitate them.)
