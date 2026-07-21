@@ -87,10 +87,14 @@ class MegatronTrainConfig:
     seed: int = 0  # minibatch shuffling (identical on every rank by the same seed)
     bf16: bool = True  # Megatron's one precision mode: bf16 params + fp32 masters
     grad_reduce_in_fp32: bool = True  # full-Megatron grad fidelity (the fake reduces in bf16)
-    use_te_layers: bool = False  # False = get_gpt_layer_local_spec (plain-torch modules,
-    #   megatron.md §6: TE spec is a later perf rung). TE also runs fp32 GEMMs
-    #   as TF32 regardless of torch.backends flags — measured 2026-07-20,
-    #   1.5e-3 mean logprob noise vs the fake trainer in "fp32"; local is exact.
+    use_te_layers: bool = True  # Transformer-Engine layer spec — fused kernels +
+    #   FlashAttention/cuDNN attention dispatch; the TRAINING default (user
+    #   decision 2026-07-20, validated same day: bf16 parity bands hold on TE).
+    #   False = get_gpt_layer_local_spec (plain-torch modules) — the fp32
+    #   parity/debug path: TE runs fp32 GEMMs as TF32 regardless of
+    #   torch.backends flags (measured 2026-07-20: 1.5e-3 mean logprob noise
+    #   in "fp32"; local is exact to 1e-4-tier). Rule: train TE+bf16, debug
+    #   local+fp32.
     use_distributed_optimizer: bool = True  # shard optimizer states across DP (ZeRO-1 style)
     # The door, not the plan: parallelism is config here, never code.
     tensor_parallel: int = 1

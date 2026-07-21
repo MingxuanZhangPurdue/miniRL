@@ -196,7 +196,9 @@ TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1, so "fp32" torch matmuls silently run
 TF32 (4.8e-2 matmul error vs 8.7e-5 true fp32) — fp32 parity work must
 disable torch.backends.*.allow_tf32; (b) TE GEMMs ignore those torch flags
 entirely — with the TE layer spec the "fp32" model carried 1.5e-3 mean
-logprob noise; the local layer spec (the §6 default anyway) is true fp32.
+logprob noise; only the local layer spec is true fp32. Hence the standing
+rule: TRAIN on TE+bf16 (the default since 2026-07-20), DEBUG on local+fp32
+(use_te_layers=False — what recipe 08's fp32 leg forces).
 
 ## 6. Environment (box) — slime's stack as reference (docker/Dockerfile)
 
@@ -204,9 +206,10 @@ logprob noise; the local layer spec (the §6 default anyway) is true fp32.
                              with the pip release used by the box spike)
     Megatron-Bridge          slime pins radixark/Megatron-Bridge@bridge
                              (--no-deps); try upstream NVIDIA first
-    transformer-engine       2.16.1 — OPTIONAL for us at first: use
-                             get_gpt_layer_local_spec() (plain-torch
-                             modules); TE spec is a later perf rung
+    transformer-engine       2.16.1 — was "optional at first, later perf
+                             rung"; SUPERSEDED 2026-07-20: TE spec is the
+                             training default (use_te_layers=True), local
+                             spec (plain-torch) is the fp32 parity path
     flash-attn               2.8.3 (full-attention layers)
     flash-linear-attention   0.4.2 (only for GDN hybrids: Qwen3.5/-Next)
     numpy                    <2 (Megatron requirement)
@@ -229,8 +232,11 @@ VALIDATED P1 STACK (2026-07-20, the §5a box; the record the rule demands):
     nvidia-resiliency-ext    upgraded to >=0.6.0 (the container's 0.5.x makes
                              `import megatron.core` raise at nvrx probing)
     transformers             5.8.1 (bridge pin >=5.8.1,<5.9)
-    transformer-engine       2.13 preinstalled, UNUSED (local layer spec,
-                             see the §5a TF32 trap and use_te_layers)
+    transformer-engine       2.13 preinstalled; the TRAINING default since
+                             2026-07-20 (bf16 leg re-validated on the TE
+                             spec same day: logprobs mean 3.5e-2 nats,
+                             grad_norm rel 8.8e-3 — in band). fp32 parity
+                             stays on the local spec (§5a TF32 trap)
     numpy                    2.1.0 — the <2 requirement is GONE at mcore
                              0.18 when the [dev,mlm] extras are skipped
 
@@ -246,9 +252,11 @@ VALIDATED P1 STACK (2026-07-20, the §5a box; the record the rule demands):
          MEASURED (fp32 leg, local layer spec, TF32 off): shift adapter
          EXACT (0.0); logprobs mean 6.7e-6 / max 9.5e-5 nats; grad_norm
          rel 4.1e-4; step-2 loss rel 2.4e-5, grad_norm rel 3.6e-4.
-         MEASURED (bf16 leg vs fp32 fake): step-1 grad_norm rel 3.6e-3;
-         logprobs mean 3.8e-2 nats (weight quantization on a random-token
-         batch, on top of precision.md §3's kernel band); step-2 parity is
+         MEASURED (bf16 leg vs fp32 fake — local spec: grad_norm rel
+         3.6e-3, logprobs mean 3.8e-2; TE spec, the production config,
+         re-run same day: grad_norm rel 8.8e-3, logprobs mean 3.5e-2 —
+         weight quantization on a random-token batch, on top of
+         precision.md §3's kernel band); step-2 parity is
          UNDEFINED vs an fp32 reference — lr=1e-5 updates are sub-ulp for
          bf16 params, so the spike asserts the sub-ulp signature instead
          (mcore kl2 1.8 vs fake 32.8 on the same nominal step).]
@@ -260,8 +268,11 @@ VALIDATED P1 STACK (2026-07-20, the §5a box; the record the rule demands):
         gather sanity, wandb metrics parity with today's 05 recipe.
         NOTE: the §5a box has ONE GPU — DP>1 and NCCL-at-world-2 need a
         multi-GPU pod (the original box_runbook.md plan) or gloo smoke.
-    P4  perf rungs, measured one at a time: TE layer spec, fused adam,
-        grad_reduce_in_fp32 A/B, optional packing.
+    P4  perf rungs, measured one at a time: fused adam, grad_reduce_in_fp32
+        A/B, optional packing (needs the TE spec's thd path, §4). The TE
+        layer spec rung was pulled forward: default-on since 2026-07-20
+        (user decision; bf16 parity bands re-verified on TE the same day —
+        the tokens/sec A/B vs local remains unmeasured).
     P5  (door, not plan) tp=2 experiment to prove the config-only claim.
 
 Open questions RESOLVED by P1 (2026-07-20): version pair = mcore 0.18.0 +

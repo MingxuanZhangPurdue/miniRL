@@ -141,9 +141,12 @@ def main() -> None:
     torch.cuda.empty_cache()
 
     # ---------------- Megatron trainer (the subject) ----------------
+    # use_te_layers follows the mode: the bf16 leg runs the PRODUCTION config
+    # (TE spec, the default); the fp32 leg needs true-fp32 GEMMs, which TE
+    # cannot deliver (TF32 regardless of torch flags) -> local spec.
     mega = MegatronTrainer(args.model, grpo_loss, GRPOConfig(), MegatronTrainConfig(
         lr=LR, minibatch_size=8, micro_batch_size=4, bf16=args.bf16,
-        grad_reduce_in_fp32=True))
+        use_te_layers=args.bf16, grad_reduce_in_fp32=True))
     got = two_steps(mega, batch)
 
     # ---------------- the parity table ----------------
