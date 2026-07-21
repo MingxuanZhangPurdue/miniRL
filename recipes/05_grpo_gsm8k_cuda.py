@@ -58,6 +58,10 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-6)
     ap.add_argument("--fp32", action="store_true",
                     help="disable bf16 (Megatron's default precision mode) — parity/debug runs only")
+    ap.add_argument("--pack-max-tokens", type=int, default=None,
+                    help="pack each microbatch into dense pad-free rows under this token "
+                         "budget (replaces --micro-batch-size as the grad-accum unit; "
+                         "needs bf16). None = padded microbatches")
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--project", default="minirl")
     ap.add_argument("--name", default=None)
@@ -74,7 +78,8 @@ def main() -> None:
     assert b % world == 0, f"B={b} not divisible by world={world}"
     loss_cfg = GRPOConfig(use_tis=True)
     train_cfg = MegatronTrainConfig(
-        lr=args.lr, ppo_epochs=1, minibatch_size=b, micro_batch_size=8, bf16=not args.fp32
+        lr=args.lr, ppo_epochs=1, minibatch_size=b, micro_batch_size=8,
+        bf16=not args.fp32, pack_max_tokens=args.pack_max_tokens,
     )
     collect_cfg = CollectConfig(
         group_size=args.group_size, target_groups=args.target_groups, strategy="filter"

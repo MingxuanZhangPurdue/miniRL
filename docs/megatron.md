@@ -160,11 +160,12 @@ Right-padded rectangles stay valid: with causal-only masking (mask=None)
 pad tokens sit at row ends, causality means real positions never attend to
 them, and the loss mask zeroes their contribution — same argument as today.
 Position ids are explicit in mcore (`arange(T)` per row). Sequence packing
-(cu_seqlens) remains a later, optional rung, as before — and note it is
-OUR job if we ever want it: mcore only accepts an already-packed batch
-(PackedSeqParams / thd layout; slime builds it in megatron_utils/data.py),
-and the thd path needs the TE layer spec (local DotProductAttention has no
-varlen kernels), so packing sits BEHIND the TE perf rung in §7 P4.
+is BUILT (2026-07-20), trainer-internal: minirl/packing.py packs whole rows
+under cfg.pack_max_tokens, the forward runs thd via PackedSeqParams, and
+the CE map scatters back to (B, T) before any loss code runs — algos/
+never sees the packed format (design + measured equivalence:
+docs/packing.md §1a). Needs the TE spec (local DotProductAttention has no
+varlen kernels), hence bf16-only; the fp32 parity path stays padded.
 
 ## 5. Platform reality: Megatron is CUDA-box-only (measured 2026-07-20)
 
@@ -275,10 +276,12 @@ VALIDATED P1 STACK (2026-07-20, the §5a box; the record the rule demands):
         NOTE: the §5a box has ONE GPU — DP>1 and NCCL-at-world-2 need a
         multi-GPU pod (the original box_runbook.md plan) or gloo smoke.
     P4  perf rungs, measured one at a time: fused adam, grad_reduce_in_fp32
-        A/B, optional packing (needs the TE spec's thd path, §4). The TE
-        layer spec rung was pulled forward: default-on since 2026-07-20
-        (user decision; bf16 parity bands re-verified on TE the same day —
-        the tokens/sec A/B vs local remains unmeasured).
+        A/B. Two rungs were pulled forward on 2026-07-20 (user decisions),
+        correctness-validated but throughput-unmeasured: the TE layer spec
+        (default-on; bf16 parity bands re-verified on TE) and sequence
+        packing (§4, packing.md §1a; recipe 08 --packed equivalence PASSED
+        — packed marginally closer to fp32 truth than padded). Their
+        tokens/sec A/Bs on a real recipe-05 run remain the open items.
     P5  (door, not plan) tp=2 experiment — re-add the tp/pp config fields
         (removed 2026-07-20, §0) and prove the interfaces-only claim.
 

@@ -9,6 +9,8 @@ it, then Megatron — 12GB cards hold one 0.6B trainer at a time, not two.
     PYTHONPATH=. python recipes/08_megatron_p1_parity.py
     # the real mode (Megatron bf16 + fp32 masters) vs the fp32 fake — loose band:
     PYTHONPATH=. python recipes/08_megatron_p1_parity.py --bf16
+    # sequence packing: mcore packed vs mcore padded, both bf16 TE:
+    PYTHONPATH=. python recipes/08_megatron_p1_parity.py --packed
 
 Checks (each prints its measured numbers; the run fails loud on any breach):
   0  shift adapter, pure arithmetic: _ce_to_logprobs(manual fused-CE map) ==
@@ -89,10 +91,73 @@ def check(name: str, measured: float, limit: float, failures: list) -> None:
         failures.append(name)
 
 
+def finish(mode: str, failures: list) -> None:
+    if failures:
+        print(f"\nP1 parity ({mode}): FAIL — {failures}")
+        sys.exit(1)
+    print(f"\nP1 parity ({mode}): PASS")
+
+
+def packed_leg(args, batch: Batch, mask, failures: list) -> None:
+    """mcore packed vs mcore padded (both bf16+TE) on the same frozen batch,
+    with a raw fp32 HF forward as ground truth.
+
+    Dense-bf16 and varlen-bf16 are DIFFERENT kernel families; each carries
+    its own noise vs fp32 truth, so packed-vs-padded shows their quadrature
+    sum. The decisive check is therefore against truth: packing must sit no
+    farther from fp32 than padded does — a pack/unpack index error would
+    read as whole nats there, and as exact-zero breakage in loss1."""
+    import gc
+
+    from transformers import AutoModelForCausalLM
+    from tests.fake_trainer import TrainConfig, Trainer
+
+    hf = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.float32)
+    fake = Trainer(hf, grpo_loss, GRPOConfig(), TrainConfig(
+        lr=LR, minibatch_size=8, micro_batch_size=4), device="cuda")
+    truth = fake.compute_logprobs(batch)  # (B, T) fp32 ground truth
+    del fake, hf
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    ref_t = MegatronTrainer(args.model, grpo_loss, GRPOConfig(), MegatronTrainConfig(
+        lr=LR, minibatch_size=8, micro_batch_size=4, bf16=True))
+    ref = two_steps(ref_t, batch)
+    del ref_t
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    # budget 96 splits this batch's 8 rows (24..38 real tokens each) into
+    # several multi-row packs — the multi-segment path is actually exercised
+    packed_t = MegatronTrainer(args.model, grpo_loss, GRPOConfig(), MegatronTrainConfig(
+        lr=LR, minibatch_size=8, micro_batch_size=4, bf16=True, pack_max_tokens=96))
+    got = two_steps(packed_t, batch)
+
+    d = (got["logprobs"] - ref["logprobs"])[mask]
+    padded_err = (ref["logprobs"] - truth)[mask].abs().mean().item()
+    packed_err = (got["logprobs"] - truth)[mask].abs().mean().item()
+    rel = lambda a, b: abs(a - b) / max(abs(b), 1e-12)
+    print(f"\npacked leg — logprobs on {int(mask.sum())} response tokens:\n"
+          f"  vs fp32 truth: padded {padded_err:.3e}  packed {packed_err:.3e} (mean nats)")
+    check("packed truth-gap / padded truth-gap", packed_err / padded_err, 1.5, failures)
+    check("mean |packed - padded| (nats)", d.abs().mean().item(), 6e-2, failures)
+    check("max  |packed - padded| (nats)", d.abs().max().item(), 6e-1, failures)
+    print(f"  loss1  packed {got['loss1']:+.6f}  padded {ref['loss1']:+.6f}\n"
+          f"  gnorm1 packed {got['gn1']:.6f}  padded {ref['gn1']:.6f}\n"
+          f"  loss2  packed {got['loss2']:+.6f}  padded {ref['loss2']:+.6f}\n"
+          f"  gnorm2 packed {got['gn2']:.6f}  padded {ref['gn2']:.6f}")
+    check("abs diff loss1", abs(got["loss1"] - ref["loss1"]), 1e-5, failures)
+    check("rel diff grad_norm1", rel(got["gn1"], ref["gn1"]), 5e-2, failures)
+    check("rel diff loss2", rel(got["loss2"], ref["loss2"]), 1e-1, failures)
+    check("rel diff grad_norm2", rel(got["gn2"], ref["gn2"]), 1e-1, failures)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bf16", action="store_true",
                     help="Megatron in its real mode (bf16 + fp32 masters) vs the fp32 fake")
+    ap.add_argument("--packed", action="store_true",
+                    help="mcore packed vs mcore padded (both bf16 TE) on the same frozen batch")
     ap.add_argument("--model", default=MODEL)
     ap.add_argument("--backend", default="nccl")
     args = ap.parse_args()
@@ -117,6 +182,11 @@ def main() -> None:
     print(f"frozen batch: rows={batch.input_ids.shape[0]} T={batch.input_ids.shape[1]} "
           f"tokens={int(mask.sum())} vocab={vocab}")
     failures: list[str] = []
+
+    if args.packed:
+        packed_leg(args, batch, mask, failures)
+        finish("packed", failures)
+        return
 
     # ---------------- fake trainer (the reference), fp32, then FREED ----------------
     from transformers import AutoModelForCausalLM
@@ -188,11 +258,7 @@ def main() -> None:
         check("rel diff loss2", rel(got["loss2"], ref["loss2"]), l2_lim, failures)
         check("rel diff grad_norm2", rel(got["gn2"], ref["gn2"]), gn_lim, failures)
 
-    mode = "bf16" if args.bf16 else "fp32"
-    if failures:
-        print(f"\nP1 parity ({mode}): FAIL — {failures}")
-        sys.exit(1)
-    print(f"\nP1 parity ({mode}): PASS")
+    finish("bf16" if args.bf16 else "fp32", failures)
 
 
 if __name__ == "__main__":

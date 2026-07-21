@@ -20,7 +20,7 @@ that together form a miniature version of production frameworks like
 
 ## 0. Status (updated 2026-07-20 — keep this section current)
 
-**Built and tested (67 passing tests, all CPU/MPS):** the full RLVR stack —
+**Built and tested (74 passing tests, all CPU/MPS):** the full RLVR stack —
 `VLLMEngine`, THE rollout engine (vLLM-only decision 2026-07-20: HFEngine
 and its StreamAdapter REMOVED — the streaming contract is now pinned by
 tests/test_fully_async.py's FakeStreamEngine, and the fp32-oracle duty
@@ -29,7 +29,10 @@ weight-update recipe validated, CUDA smoke PASSED 2026-07-20), losses
 grpo/gspo/cispo/sft as
 files + dapo/dr_grpo as named configs (`LOSSES` registry, algos/README.md),
 group advantages with pluggable `advantage_fn`, TIS, the three-mode reduce
-(`loss_agg`), `make_batch`, **the Megatron trainer** (`minirl/megatron.py`,
+(`loss_agg`), `make_batch`, **trainer-internal sequence packing**
+(2026-07-20, minirl/packing.py + pack_max_tokens — packing.md §1a; packed
+equivalence measured on-box, marginally closer to fp32 truth than padded),
+**the Megatron trainer** (`minirl/megatron.py`,
 built 2026-07-20 per docs/megatron.md — Megatron-Core owns fwd/bwd,
 DDP+fp32 grad reduce, bf16+fp32-master optimizer; Megatron-Bridge builds
 the model from the HF name and exports HF-named weights for publish; our
@@ -69,9 +72,8 @@ GPU)**, the sync controller
 (`controllers/sync.py` — collect -> train -> publish via collect_groups_dp,
 no overlap), in-flight weight updates (DEFERRED by decision 2026-07-10 —
 docs/async_tier2.md §4), NCCL weight sync (need the CUDA box;
-docs/precision.md, DESIGN §6), packing (docs/packing.md — prototyped and
-ROLLED BACK for readability, 2026-07-09; build-or-not is an open decision),
-agentic runners (docs/agentic_rl.md), RLOO, DPO (notes/dpo_derivation.md
+docs/precision.md, DESIGN §6), agentic runners (docs/agentic_rl.md), RLOO,
+DPO (notes/dpo_derivation.md
 ready), on-policy distillation, eval harness, checkpoint/resume schedule.
 
 **Agreed build order:** SFT recipe → GSM8K RLVR at real scale (GPU) → DPO →
@@ -261,7 +263,11 @@ miniRL/
 │   │   │                        #   scalar AdvantageFn tier — batching.py)
 │   │   └── distill.py           # on-policy distillation: reverse-KL to teacher (MOPD-lite)
 │   │
-│   ├── megatron.py              # [built 2026-07-20, box-validation pending] THE trainer:
+│   ├── packing.py               # [built 2026-07-20] sequence packing, trainer-internal:
+│   │                            #   plan/pack/unpack (pure tensor, CPU-tested); the
+│   │                            #   Megatron trainer packs the forward, unpacks the CE
+│   │                            #   before the loss — algos/ never sees it (packing.md §1a)
+│   ├── megatron.py              # [built 2026-07-20, P1-validated single-GPU] THE trainer:
 │   │                            #   Megatron-Core end to end (docs/megatron.md).
 │   │                            #   Bridge-built model from the HF name, fused-CE
 │   │                            #   logprobs (ONE shift adapter), our losses via the
@@ -275,7 +281,8 @@ miniRL/
 │   ├── rollout/                 # ≈ slime's data buffer + orchestration layer
 │   │   ├── types.py             # [done] SamplingParams, Trajectory, Batch (the data contract)
 │   │   ├── batching.py          # [done] make_batch (pad + advantages), mini/microbatch slicing
-│   │   │                        #   [planned] pack_batch: sequence packing (see §6, packing)
+│   │   │                        #   (packing lives in minirl/packing.py, NOT here — the
+│   │   │                        #   collation contract stays padded (B, T) forever)
 │   │   ├── filtering.py         # [done] group filters (reward_nonzero_std = DAPO dynamic
 │   │   │                        #   sampling) + RewardFn/GroupFilter types. Collection
 │   │   │                        #   itself lives in controllers/fully_async.py —
@@ -529,13 +536,15 @@ The sync controller is a degenerate case of the async one (1 worker,
 `max_version_lag = 0`) — but we keep both files because the sync one should be
 readable in five minutes.
 
-### Sequence packing (design only — build-or-not is an open decision)
+### Sequence packing (BUILT 2026-07-20 — trainer-internal, Megatron-only)
 
-Full implementation design — file-by-file changes, worked example, testing
-strategy: **docs/packing.md**. A prototype was built and rolled back
-(2026-07-09): correct (packed==padded pinned by tests before removal), but it
-threaded an optional second layout through Batch/trainer/aggregate/gspo and
-made the core files harder to read — readability wins here.
+Design, knobs, and measured equivalence: **docs/packing.md §1a**. The 2026
+implementation packs whole rows inside the Megatron trainer
+(`minirl/packing.py`, `MegatronTrainConfig.pack_max_tokens`, default OFF)
+and unpacks the fused-CE map back to `(B, T)` before any loss code runs —
+so unlike the first prototype (rolled back 2026-07-09 for threading a
+second layout through Batch/trainer/aggregate/gspo), the packed format
+never leaves the trainer and the core files stay readable.
 
 RL batches have brutal length variance, so padded (B, T) rectangles are
 mostly pad — slime doesn't even have a padded path: every Megatron microbatch

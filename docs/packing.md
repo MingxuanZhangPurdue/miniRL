@@ -1,11 +1,21 @@
 # Sequence packing: implementation design
 
-Status: **NOT implemented — design only.** An implementation was prototyped
-and rolled back (2026-07-09): threading the packed layout through Batch /
-trainer / aggregate / gspo made the core files noticeably harder to read, and
-readability outranks a trainer-side speedup here. Whether and when to build
-it is an OPEN DECISION — revisit when GPU-scale runs report a `frac_padding`
-that hurts.
+Status: **BUILT 2026-07-20 — trainer-internal, Megatron-only** (§1a):
+`minirl/packing.py` + the packed path in `minirl/megatron.py`, enabled per
+run via `MegatronTrainConfig.pack_max_tokens` (default OFF — flip it when a
+run's `frac_padding` says it pays). Equivalence measured on the box the
+same day (`recipes/08_megatron_p1_parity.py --packed`): packed sits
+marginally CLOSER to the fp32 truth than the padded path (3.43e-2 vs
+3.48e-2 mean nats on the frozen batch), on-policy loss matches to 7e-9,
+grad_norm to 4e-3, step-2 loss/grad_norm to 1e-2/4e-2.
+
+A FIRST implementation that threaded the packed layout through Batch /
+trainer / aggregate / gspo was prototyped and rolled back (2026-07-09):
+it made the core files noticeably harder to read. §2's HF mechanism and
+§3's file-by-file plan document that design as history — the Megatron
+migration (2026-07-20) dissolved its two hard parts (see §1a) and the
+built design touches NONE of those files: losses never see the packed
+format.
 
 Doc-before-code (repo convention; code must match this or the doc gets
 updated). Grounded in slime's `megatron_utils/data.py::get_batch` (THD packed
@@ -20,6 +30,58 @@ logged) says how much of the rectangle is dead compute: 0.02–0.07 in the
 GSM8K smoke test (short, uniform answers), 0.4–0.7 typical for long-CoT RLVR.
 Throughput gain from packing ≈ `1 / (1 - frac_padding)` — build it when the
 dashboard says it pays, not before (roadmap Phase 5.5).
+
+## 1a. The BUILT design (2026-07-20): pack inside the trainer, unpack before the loss
+
+Megatron dissolved the first design's two hard parts. (a) The attention
+hazard (§2's block-diagonal rule) is no longer an inference-from-position-ids
+trick: mcore takes an EXPLICIT `PackedSeqParams(cu_seqlens, qkv_format=
+"thd")` into TE's varlen kernels — hand it wrong input and it raises.
+(b) The fused-CE labels path returns a per-token vector, so the packed
+layout can be unwound BEFORE any loss code runs — the option the HF-logits
+trainer never had cleanly.
+
+The shape of the built code:
+
+    minirl/packing.py       pure tensor, no megatron imports (CPU-testable):
+      plan_packs            sequential greedy fill under the token budget,
+                            ORDER-PRESERVING (keeps the shuffled SGD order);
+                            an oversized row gets a pack of its own — the
+                            only pack allowed over budget, never split
+      pack_rows -> Pack     whole rows concatenated pad-free: tokens,
+                            per-segment position_ids, cu_seqlens, and the
+                            precomputed scatter map (dst_row/dst_col/src_pos)
+      unpack_ce             packed CE -> padded (S, T) logprob map in the
+                            repo convention; position 0, seams, and padding
+                            stay 0.0. The seam CE (each segment's last
+                            position scores across a boundary) is simply
+                            never read — the packed generalization of the
+                            padded path's dummy last column.
+    minirl/megatron.py      _micros() picks the grad-accum slicing (row
+                            counts, or packs under cfg.pack_max_tokens);
+                            _forward_ce() runs either layout and returns the
+                            adapter back to (B, T); everything downstream —
+                            loss_fn, aggregate_loss, denominators, metrics —
+                            is layout-blind and byte-identical to unpacked.
+
+The two knobs, mirroring slime's split exactly: `minibatch_size` stays the
+optimizer-step batch size (slime `--global-batch-size` — the knob with RL
+meaning; packing never touches it) and `pack_max_tokens` replaces
+`micro_batch_size` as the grad-accum unit (slime `--max-tokens-per-gpu` —
+pure memory/speed; the minibatch-global denominator + linear aggregation
+make the gradient independent of the slicing). A third,
+`logprob_pack_max_tokens` (slime `--log-probs-max-tokens-per-gpu`), allows
+bigger packs for the no-grad old-logprob recompute. An absurdly large
+budget degrades gracefully into one giant microbatch: same gradient, OOM
+risk — the budget is the user's promise about what fits.
+
+Constraints: whole rows only (never split a sequence — all three loss_agg
+modes then work unchanged); bf16 + TE only (local-spec fp32 has no varlen
+kernels — asserted at construction), so the fp32 parity/debug legs stay
+padded forever. Tests: index math + planning + seam-gradient pins in
+tests/test_packing.py (CPU); kernel-level equivalence is recipe 08
+--packed's job (packed-vs-padded bands PLUS the decisive check: packed must
+sit no farther from a raw fp32 HF forward than padded does).
 
 ## 2. The packed format, by worked example
 
@@ -52,7 +114,11 @@ causal+same-segment mask reproduces each sequence's solo logprobs exactly,
 and the naive 2D mask measurably contaminates — the design is sound; it is
 the code-complexity trade that is deferred, not the correctness.)
 
-## 3. What changes, file by file
+## 3. HISTORY — the rolled-back first design's file-by-file plan
+
+(The built design touches none of these files; §1a replaces this section.
+Kept because the analysis — especially §2's seam subtlety and the
+block-diagonal contamination experiment — grounds the built code too.)
 
 ### types.py — Batch grows two optional fields (~5 lines)
 

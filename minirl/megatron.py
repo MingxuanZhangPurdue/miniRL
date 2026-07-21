@@ -15,7 +15,10 @@ fp32-master optimizer, clipping and the found-inf guard. WE own the loss
 (minirl/algos, unchanged), minibatch shuffling, the global-denominator
 rule, and weight publish. Megatron-Bridge owns HF checkpoints both ways:
 the model is built FROM the HF hub name, and export_hf_weights streams
-HF-named tensors straight into the engines' load_weights.
+HF-named tensors straight into the engines' load_weights. Sequence packing
+is trainer-INTERNAL (cfg.pack_max_tokens): minirl/packing.py owns the dense
+layout, _forward_ce runs it, and the CE map scatters back to (B, T) before
+any loss code runs — losses never see the packed format.
 
 The three integration conventions (each verified against Megatron-LM
 source, pinned here so the box parity run has a checklist):
@@ -47,6 +50,7 @@ from megatron.core.distributed import (
     finalize_model_grads,
 )
 from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
+from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
@@ -54,6 +58,7 @@ from megatron.core.utils import get_model_config
 from torch import Tensor
 
 from minirl.algos.aggregate import aggregate_loss, minibatch_denom
+from minirl.packing import Pack, pack_rows, plan_packs, unpack_ce
 from minirl.rollout.batching import iter_microbatches, iter_minibatches, slice_batch
 from minirl.rollout.types import Batch
 
@@ -88,6 +93,15 @@ class MegatronTrainConfig:
     grad_reduce_in_fp32: bool = True  # full-Megatron grad fidelity (the fake reduces in bf16)
     use_te_layers: bool = True  # Transformer-Engine layer spec — fused kernels + FlashAttention/cuDNN attention dispatch
     use_distributed_optimizer: bool = True  # shard optimizer states across DP (ZeRO-1 style)
+    pack_max_tokens: int | None = None  # token budget per fwd/bwd: each microbatch
+    #   becomes ONE dense pad-free row of whole sequences under this budget
+    #   (an oversized row gets a pack of its own). Replaces micro_batch_size
+    #   as the grad-accum unit; minibatch_size stays the optimizer-step batch
+    #   size, so the budget affects memory/speed, never the gradient.
+    #   Needs bf16 + TE (varlen attention kernels).
+    logprob_pack_max_tokens: int | None = None  # larger budget for the no-grad
+    #   logprob recompute (no activations stored, so bigger packs fit);
+    #   None -> pack_max_tokens
 
 
 class MegatronTrainer:
@@ -101,6 +115,10 @@ class MegatronTrainer:
 
     def __init__(self, model_name_or_path: str, loss_fn, loss_cfg, cfg: MegatronTrainConfig):
         assert dist.is_initialized(), "call setup_distributed() (torchrun) before MegatronTrainer"
+        if cfg.pack_max_tokens is not None:
+            assert cfg.bf16 and cfg.use_te_layers, "packing needs bf16 + TE varlen kernels"
+        else:
+            assert cfg.logprob_pack_max_tokens is None, "logprob packing needs pack_max_tokens set"
         self.loss_fn = loss_fn  # (policy_logprobs (b,T), batch, cfg) -> (loss_map (b,T), metrics)
         self.loss_cfg = loss_cfg
         self.cfg = cfg
@@ -206,26 +224,18 @@ class MegatronTrainer:
         denom = minibatch_denom(self.loss_agg, mb.loss_mask)  # full mask FIRST, slice after
         denom = denom.cuda() if isinstance(denom, torch.Tensor) else denom
         local = mb if self.world == 1 else slice_batch(mb, torch.arange(self.rank, b, self.world))
-        micros = list(iter_microbatches(local, self.cfg.micro_batch_size))
+        micros = self._micros(local, self.cfg.pack_max_tokens)
 
         self.model.train()
         self.ddp.zero_grad_buffer()
         self.optimizer.zero_grad()
 
         def forward_step(data_iterator, model):
-            micro = next(data_iterator)
-            tokens = micro.input_ids.cuda()  # (b, T)
-            ce = model(  # (b, T) fused vocab CE of the NEXT token, fp32
-                tokens,
-                _position_ids(tokens),
-                None,  # attention_mask: None -> causal; right-padded rows are
-                # safe because causality means real tokens never see the pads
-                # and the loss mask zeroes the pads' own contribution
-                labels=_labels(tokens),
-            )
+            micro, pack = next(data_iterator)
+            ce, to_logprobs = _forward_ce(model, micro, pack)
 
             def loss_func(ce_map: Tensor):
-                policy_logprobs = _ce_to_logprobs(ce_map)  # (b, T) OUR convention, grad flows
+                policy_logprobs = to_logprobs(ce_map)  # (b, T) OUR convention, grad flows
                 loss_map, metrics = self.loss_fn(policy_logprobs, _to_cuda(micro), self.loss_cfg)
                 loss = aggregate_loss(loss_map, micro.loss_mask.cuda(), self.loss_agg, denom=denom)
                 # x micros: undo the schedule's /num_microbatches; x world:
@@ -282,19 +292,33 @@ class MegatronTrainer:
         Every rank recomputes the FULL batch: duplicated FLOPs, zero
         communication, same wall time (ranks run in parallel). Direct module
         calls — at pp=1 the schedule adds nothing to inference. Same fused-CE
-        path as training, so pi_old matches pi_theta's kernels exactly and
-        the on-policy PPO ratio starts at 1, not 1 +- kernel noise.
+        path (and, when packing, the same pack construction) as training, so
+        pi_old matches pi_theta's kernels exactly and the on-policy PPO ratio
+        starts at 1, not 1 +- kernel noise.
         """
         was_training = self.model.training
         self.model.eval()
+        budget = self.cfg.logprob_pack_max_tokens or self.cfg.pack_max_tokens
         chunks = []
-        for micro in iter_microbatches(batch, self.cfg.micro_batch_size):
-            tokens = micro.input_ids.cuda()  # (b, T)
-            ce = self.model(tokens, _position_ids(tokens), None, labels=_labels(tokens))
-            chunks.append(_ce_to_logprobs(ce).float().cpu())  # (b, T)
+        for micro, pack in self._micros(batch, budget):
+            ce, to_logprobs = _forward_ce(self.model, micro, pack)
+            chunks.append(to_logprobs(ce).float().cpu())  # (b, T)
         if was_training:
             self.model.train()
         return torch.cat(chunks, dim=0)  # (B, T)
+
+    def _micros(self, mb: Batch, pack_budget: int | None) -> list[tuple[Batch, Pack | None]]:
+        """Grad-accum slices of a minibatch: fixed row counts, or dense packs
+        under a token budget. Whole rows only, order preserved — so packed
+        and padded slicings cover identical rows and (through the
+        minibatch-global denominator) produce the same gradient."""
+        if pack_budget is None:
+            return [(m, None) for m in iter_microbatches(mb, self.cfg.micro_batch_size)]
+        lengths = mb.attention_mask.sum(-1)  # (b,) real tokens per row
+        return [
+            (slice_batch(mb, torch.tensor(idx)), pack_rows(mb.input_ids, lengths, idx))
+            for idx in plan_packs([int(n) for n in lengths], pack_budget)
+        ]
 
     # ---------------- weight publish ----------------
 
@@ -307,6 +331,38 @@ class MegatronTrainer:
         rank 0's export alone is the full weights.
         """
         return self.bridge.export_hf_weights([self.ddp], cpu=True)
+
+
+def _forward_ce(model, micro: Batch, pack: Pack | None):
+    """One microbatch forward -> (fused-CE map, adapter to (b, T) logprobs).
+
+    Padded: causal-only attention (mask None) is safe for right-padded rows —
+    real tokens never attend forward into the pads, and the loss mask zeroes
+    the pads' own contribution. Packed: one dense pad-free row; cu_seqlens
+    give the varlen kernels the block-diagonal attention pattern, and the
+    returned adapter scatters the CE back to the padded (b, T) layout, so
+    everything downstream of this function is layout-blind.
+    """
+    if pack is None:
+        tokens = micro.input_ids.cuda()  # (b, T)
+        ce = model(tokens, _position_ids(tokens), None, labels=_labels(tokens))  # (b, T)
+        return ce, _ce_to_logprobs
+    tokens = pack.tokens.cuda()  # (1, T_pack)
+    cu = pack.cu_seqlens.cuda()
+    ce = model(  # (1, T_pack) fused vocab CE over the dense packed row
+        tokens,
+        pack.position_ids.cuda(),
+        None,
+        labels=_labels(tokens),
+        packed_seq_params=PackedSeqParams(
+            qkv_format="thd",
+            cu_seqlens_q=cu,
+            cu_seqlens_kv=cu,
+            max_seqlen_q=pack.max_seqlen,
+            max_seqlen_kv=pack.max_seqlen,
+        ),
+    )
+    return ce, lambda ce_map: unpack_ce(ce_map, pack, micro.input_ids.shape[1])
 
 
 # ---------------- the ONE shift adapter (banner convention 3) ----------------
