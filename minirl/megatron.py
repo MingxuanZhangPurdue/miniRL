@@ -1,7 +1,8 @@
 """THE trainer: Megatron-Core drives training; this module is the whole
 integration. CUDA-box ONLY — megatron-core hard-imports triton (no macOS
-build), so all Megatron imports live inside methods and the local test
-suite drives tests/fake_trainer.py (the executable spec of the same
+build), so this MODULE only imports on the box (imports are file-level by
+decision 2026-07-20; only the box recipes 05/08 import it) and the local
+test suite drives tests/fake_trainer.py (the executable spec of the same
 contract) instead.
 
 The trainer duck-type consumed by controllers/fully_async.py:
@@ -38,6 +39,19 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from megatron.bridge import AutoBridge
+from megatron.bridge.models.gpt_provider import local_layer_spec
+from megatron.core import parallel_state
+from megatron.core.distributed import (
+    DistributedDataParallel,
+    DistributedDataParallelConfig,
+    finalize_model_grads,
+)
+from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
+from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
+from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+from megatron.core.utils import get_model_config
 from torch import Tensor
 
 from minirl.algos.aggregate import aggregate_loss, minibatch_denom
@@ -93,18 +107,6 @@ class MegatronTrainer:
     """
 
     def __init__(self, model_name_or_path: str, loss_fn, loss_cfg, cfg: MegatronTrainConfig):
-        from megatron.bridge import AutoBridge
-        from megatron.core import parallel_state
-        from megatron.core.distributed import (
-            DistributedDataParallel,
-            DistributedDataParallelConfig,
-            finalize_model_grads,
-        )
-        from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
-        from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
-        from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-        from megatron.core.utils import get_model_config
-
         assert dist.is_initialized(), "call setup_distributed() (torchrun) before MegatronTrainer"
         self.loss_fn = loss_fn  # (policy_logprobs (b,T), batch, cfg) -> (loss_map (b,T), metrics)
         self.loss_cfg = loss_cfg
@@ -133,15 +135,11 @@ class MegatronTrainer:
         provider.fp16 = False
         provider.params_dtype = torch.bfloat16 if cfg.bf16 else torch.float32
         if not cfg.use_te_layers:
-            from megatron.bridge.models.gpt_provider import local_layer_spec
-
             provider.transformer_layer_spec = local_layer_spec
         provider.finalize()
         # bridge >= 0.5 providers read PP/TP roles off self._pg_collection and
         # only their (deprecated) provide_distributed_model sets it; we build
         # the model ourselves, so hand them the mpu groups we just initialized.
-        from megatron.core.process_groups_config import ProcessGroupCollection
-
         provider._pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.model = provider.provide().cuda()  # the raw GPTModel
         # to_megatron_provider(load_weights=True) only PARKS the HF->mcore

@@ -18,7 +18,7 @@ async RL, on-policy distillation — implemented in small, readable, robust file
 that together form a miniature version of production frameworks like
 [slime](https://github.com/THUDM/slime) and [verl](https://github.com/verl-project/verl).
 
-## 0. Status (updated 2026-07-14 — keep this section current)
+## 0. Status (updated 2026-07-20 — keep this section current)
 
 **Built and tested (67 passing tests, all CPU/MPS):** the full RLVR stack —
 `VLLMEngine`, THE rollout engine (vLLM-only decision 2026-07-20: HFEngine

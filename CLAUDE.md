@@ -33,7 +33,7 @@ anything (`platform`/`uname`):
   `docker start minirl-mega`, and run things via
   `docker exec -w /workspace/miniRL -e PYTHONPATH=/workspace/miniRL minirl-mega python ...`
 - Tests: `<that python> -m pytest tests/ -q` — keep it green; it is fast
-  (~10s Mac CPU; ~70s in the container, model-download tests included).
+  (~10s Mac CPU, ~15s in the container).
 - The Mac is MPS + CPU only. THE trainer is
   Megatron-Core (`minirl/megatron.py`, docs/megatron.md) and is CUDA-box-ONLY
   (megatron-core hard-imports triton; measured 2026-07-20). Local tests drive

@@ -154,7 +154,11 @@ Right-padded rectangles stay valid: with causal-only masking (mask=None)
 pad tokens sit at row ends, causality means real positions never attend to
 them, and the loss mask zeroes their contribution — same argument as today.
 Position ids are explicit in mcore (`arange(T)` per row). Sequence packing
-(cu_seqlens) remains a later, optional rung, as before.
+(cu_seqlens) remains a later, optional rung, as before — and note it is
+OUR job if we ever want it: mcore only accepts an already-packed batch
+(PackedSeqParams / thd layout; slime builds it in megatron_utils/data.py),
+and the thd path needs the TE layer spec (local DotProductAttention has no
+varlen kernels), so packing sits BEHIND the TE perf rung in §7 P4.
 
 ## 5. Platform reality: Megatron is CUDA-box-only (measured 2026-07-20)
 

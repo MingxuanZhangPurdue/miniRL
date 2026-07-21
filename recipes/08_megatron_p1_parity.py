@@ -38,6 +38,9 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from minirl.algos import GRPOConfig, grpo_loss
+from minirl.megatron import (  # file-level megatron imports: box-only, like this recipe
+    MegatronTrainConfig, MegatronTrainer, _ce_to_logprobs, _labels, setup_distributed,
+)
 from minirl.rollout.batching import make_batch
 from minirl.rollout.types import Batch, Trajectory
 
@@ -100,9 +103,6 @@ def main() -> None:
     os.environ.setdefault("WORLD_SIZE", "1")
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", "29501")
-    from minirl.megatron import (  # CUDA-box-only imports live in-function
-        MegatronTrainConfig, MegatronTrainer, _ce_to_logprobs, _labels, setup_distributed,
-    )
     setup_distributed(args.backend)
     torch.cuda.set_device(0)
     # NGC containers force TF32 (TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1): "fp32"
