@@ -75,7 +75,6 @@ from minirl.config import CollectConfig
 from minirl.rollout.batching import make_batch
 from minirl.rollout.filtering import GroupFilter, RewardFn, reward_nonzero_std
 from minirl.rollout.types import SamplingParams, Trajectory
-from minirl.train import Trainer
 
 
 class _Tally:
@@ -260,7 +259,9 @@ def _broadcast_batch(batch):
 
 def fit_async(
     engines: list,  # rank 0: one streaming engine per rollout GPU; followers: []
-    trainer: Trainer,  # the ONE Trainer; DDP engages if built under a process group
+    trainer,  # duck-typed like engines: fit_batch / compute_logprobs /
+    # hf_named_tensors / rank / world / loss_cfg (MegatronTrainer on the box,
+    # tests/fake_trainer.Trainer locally)
     reward_fn: Callable[[Trajectory], float],
     prompt_source: Callable[[int], list[Tensor]],
     sampling: SamplingParams,
@@ -272,12 +273,12 @@ def fit_async(
     """Run fully-async RL. Returns the per-iteration metrics history
     (rank 0; followers return []). See the module banner for the picture."""
     rank, world = _dist_ctx()
-    # Footgun guard: a Trainer built BEFORE init_process_group thinks world=1
+    # Footgun guard: a trainer built BEFORE init_process_group thinks world=1
     # and would silently skip slicing/DDP — every rank would train the full
     # batch identically (correct params, m x wasted compute, no loud failure).
     assert getattr(trainer, "world", 1) == world, (
         f"trainer.world={getattr(trainer, 'world', 1)} != dist world={world} — "
-        "construct the Trainer AFTER setup_distributed()"
+        "construct the trainer AFTER setup_distributed()"
     )
     if rank > 0:
         return _follow(trainer, num_iterations)
@@ -314,14 +315,14 @@ def fit_async(
 
     def publish(version: int) -> None:
         """Drain-then-publish, fleet edition. MAIN THREAD ONLY, after a join.
-        Rank-0-local even under DDP: params are replicated, so this rank's
-        plain state_dict already IS the full weights."""
+        Rank-0-local even at world>1: DP replicates params, so this rank's
+        hf_named_tensors() already IS the full weights."""
         assert not in_flight.is_set(), "publish during in-flight collection (join first)"
         for e in engines:  # ALL engines quiesce before ANY weight moves (single-version rule)
             e.drain()
-        state = {k: v.detach().cpu() for k, v in trainer.model.state_dict().items()}
+        state = list(trainer.hf_named_tensors())  # materialize ONCE, feed k engines
         for e in engines:
-            e.load_weights(state.items(), version)
+            e.load_weights(state, version)
 
     history: list[dict] = []
     pool = ThreadPoolExecutor(max_workers=1)  # ONE slot: at most one collection in flight,
@@ -376,7 +377,7 @@ def fit_async(
     return history
 
 
-def _follow(trainer: Trainer, num_iterations: int) -> list[dict]:
+def _follow(trainer, num_iterations: int) -> list[dict]:
     """Ranks > 0: no engines, no metrics, no publishes — receive the batch,
     train, repeat. Publishing never involves followers (DDP params are
     replicated; rank 0's own state_dict is the full weights), so the only

@@ -20,7 +20,7 @@ from torch import nn
 from minirl.algos import GRPOConfig, grpo_loss
 from minirl.rollout.batching import make_batch
 from minirl.rollout.types import Trajectory
-from minirl.train import TrainConfig, Trainer
+from tests.fake_trainer import TrainConfig, Trainer
 
 VOCAB = 61
 WORLD = 2

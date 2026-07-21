@@ -22,10 +22,12 @@ glossary (symbols, shapes, the four policies, notes/ symbol mapping) is
   `/Users/mingxuanzhang/miniconda3/envs/mingxuan/bin/python` (torch+MPS,
   transformers, datasets, math-verify). Never create venvs.
 - Tests: `<that python> -m pytest tests/ -q` — keep it green; it is fast (~10s).
-- This machine is an Apple-silicon Mac: MPS + CPU only. NCCL weight sync /
-  placement are CUDA-box features. The DDP learner IS implemented and tested here
-  (2-process gloo/CPU equivalence — docs/ddp.md; the FSDP2 learner it replaced
-  is retired, history in docs/fsdp2.md); NCCL is validated on the box later.
+- This machine is an Apple-silicon Mac: MPS + CPU only. THE trainer is
+  Megatron-Core (`minirl/megatron.py`, docs/megatron.md) and is CUDA-box-ONLY
+  (megatron-core hard-imports triton; measured 2026-07-20). Local tests drive
+  `tests/fake_trainer.py` — the demoted hand-written DDP trainer, now the
+  executable spec of the trainer contract (2-process gloo/CPU equivalence —
+  docs/ddp.md; FSDP2 history in docs/fsdp2.md). NCCL is validated on the box.
   vLLM RUNS LOCALLY via the vllm-metal plugin in the isolated venv
   `~/.venv-vllm-metal` (user-approved exception to the no-venv rule; repo dev
   stays on mingxuan) — spike findings + weight-update recipe:

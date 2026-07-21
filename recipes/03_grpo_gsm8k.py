@@ -47,7 +47,7 @@ from minirl.engine import HFEngine, StreamAdapter
 from minirl.logging import metrics_logger
 from minirl.rewards import make_math_reward_fn
 from minirl.rollout.types import SamplingParams
-from minirl.train import TrainConfig, Trainer
+from tests.fake_trainer import TrainConfig, Trainer  # runs-anywhere demo learner (Megatron is box-only)
 
 # ======================= CONFIG (the only thing you scale) =======================
 MODEL = "Qwen/Qwen3-0.6B"

@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from minirl.engine.vllm_engine import VLLMEngine
 from minirl.rollout.types import SamplingParams
-from minirl.train import Trainer, TrainConfig, gather_logprobs  # noqa: F401 (gather used below)
+from tests.fake_trainer import Trainer, TrainConfig, gather_logprobs  # noqa: F401 — diagnostic learner (the spec fake)
 
 MODEL = "Qwen/Qwen3-0.6B"
 PROMPT = "Question: Natalia sold clips to 48 friends. She sold half as many the next day. How many total?\nAnswer:"

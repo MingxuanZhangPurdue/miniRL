@@ -26,13 +26,15 @@ awaits the box) + `StreamAdapter` (generate()-only engines speak the
 streaming contract; one poll == one round), losses grpo/gspo/cispo/sft as
 files + dapo/dr_grpo as named configs (`LOSSES` registry, algos/README.md),
 group advantages with pluggable `advantage_fn`, TIS, the three-mode reduce
-(`loss_agg`), `make_batch`, the generic `Trainer` (microbatch-exact,
-old-logprob recompute, NaN guard, AdamW-only), **the DDP learner**
-(2026-07-15, merged into `train/trainer.py` 2026-07-16 — ddp.md §7: DDP
-replicated params, SUM-via-loss-scale, no_sync accumulation; 2-rank gloo/CPU
-equivalence == single-process for all three loss_agg modes; NCCL awaits the
-box — docs/ddp.md; REPLACED the 2026-07-13 FSDP2 learner, history in
-docs/fsdp2.md), **wandb
+(`loss_agg`), `make_batch`, **the Megatron trainer** (`minirl/megatron.py`,
+built 2026-07-20 per docs/megatron.md — Megatron-Core owns fwd/bwd,
+DDP+fp32 grad reduce, bf16+fp32-master optimizer; Megatron-Bridge builds
+the model from the HF name and exports HF-named weights for publish; our
+losses plug in via the forward_step socket; CUDA-box-only, P1 parity run
+still pending. The hand-written trainer it replaced — DDP merged
+2026-07-16, ddp.md §7; FSDP2 before that, fsdp2.md — is DEMOTED to
+`tests/fake_trainer.py`: the executable spec of the trainer contract that
+the local suite drives on CPU), **wandb
 metric logging** (`minirl/logging.py`; wandb lives ONLY in recipes; recipe 03
 wires it behind `--wandb`), rewards (GSM8K math verifier + level-2 code
 sandbox), the data layer (chat templating with assistant-mask, HF prompt
@@ -54,7 +56,11 @@ vllm-metal smoke (EOS parity + weight canary), per-engine GPU pinning spike
 parity, logprob gap; findings: EngineCore fork->spawn, tied-weight dedupe, V1
 n>1 fan-out is ours now).
 
-**Decided and documented, not yet built:** the sync controller
+**Decided and documented, not yet built:** **the Megatron P1 box spike
+(docs/megatron.md §7 — the P2 code is built and locally green, but the
+loss/grad_norm parity vs tests/fake_trainer.py on a frozen batch and the
+three integration conventions in minirl/megatron.py's banner are
+UNVALIDATED until it runs on CUDA)**, the sync controller
 (`controllers/sync.py` — collect -> train -> publish via collect_groups_dp,
 no overlap), in-flight weight updates (DEFERRED by decision 2026-07-10 —
 docs/async_tier2.md §4), NCCL weight sync (need the CUDA box;
@@ -253,17 +259,16 @@ miniRL/
 │   │   │                        #   scalar AdvantageFn tier — batching.py)
 │   │   └── distill.py           # on-policy distillation: reverse-KL to teacher (MOPD-lite)
 │   │
-│   ├── train/
-│   │   └── trainer.py           # [done] THE trainer, 1..m GPUs in one class:
-│   │                            #   gather_logprobs (fp32), unconditional old_logprobs
-│   │                            #   recompute (tier-1 rule), global-denominator
-│   │                            #   microbatching, grad clip, AdamW, NaN guard.
-│   │                            #   DDP merged in 2026-07-16 (docs/ddp.md §7): rank
-│   │                            #   slice + SUM-via-loss-scale + no_sync — all no-ops
-│   │                            #   at world=1; gloo/CPU-tested, NCCL on the box
-│   │                            #   (FSDP2 history: docs/fsdp2.md). AdamW ONLY, no
-│   │                            #   optim.py/optimizer zoo (principle 8); checkpoint/
-│   │                            #   resume + LR schedule to come
+│   ├── megatron.py              # [built 2026-07-20, box-validation pending] THE trainer:
+│   │                            #   Megatron-Core end to end (docs/megatron.md).
+│   │                            #   Bridge-built model from the HF name, fused-CE
+│   │                            #   logprobs (ONE shift adapter), our losses via the
+│   │                            #   forward_step socket, global-denominator rule kept,
+│   │                            #   bridge HF export feeds engine publish unchanged.
+│   │                            #   CUDA-only (mcore hard-imports triton). Replaced
+│   │                            #   train/trainer.py (the hand-written DDP trainer,
+│   │                            #   2026-07-16..20 — demoted to tests/fake_trainer.py
+│   │                            #   as the executable spec; ddp.md/fsdp2.md history)
 │   │
 │   ├── rollout/                 # ≈ slime's data buffer + orchestration layer
 │   │   ├── types.py             # [done] SamplingParams, Trajectory, Batch (the data contract)
@@ -623,7 +628,7 @@ real frameworks. This table is the contract; keep it updated as code lands.
 | Overall dataflow owner | `rollout/controller.py` — a plain `fit()` loop that calls generate → reward → advantage → update | `train.py` driver over Ray actors | **single-controller**: `RayPPOTrainer.fit()` driving worker groups |
 | Data protocol between stages | `rollout/types.py` (`Trajectory`, `Batch`) | `Sample` dataclass flowing through the buffer | `DataProto` (tensordict + meta) passed between workers |
 | Rollout backend | duck-typed engines: `VLLMEngine` (primary, CUDA) or `HFEngine` (reference, any device) | SGLang server(s) behind a router | vLLM/SGLang rollout workers inside `ActorRolloutRefWorker` |
-| Training backend | `train/trainer.py` (ONE class; DDP auto at world>1) | Megatron-LM actor | FSDP / Megatron actor workers |
+| Training backend | `minirl/megatron.py` (Megatron-Core, DP-only config) | Megatron-LM actor | FSDP / Megatron actor workers |
 | Actor / rollout placement | `rollout/placement.py`: **colocated vs disaggregated** GPU assignment on one node | **colocated vs disaggregated** modes on GPU groups | **hybrid engine**: actor & rollout share GPUs, offload/reload between phases |
 | Weight sync learner → sampler | `rollout/weight_sync.py`: versioned NCCL broadcast (shm fallback on CPU) | bucketed NCCL broadcast (disaggregated) or CUDA IPC (colocated) | `sync_model_weights` / resharding between FSDP and vLLM formats |
 | Data buffer | `rollout/buffer.py` (bounded queue + staleness filter) | Data Buffer module (also the custom-data/partial-rollout hook point) | replay/experience handling inside the trainer loop |

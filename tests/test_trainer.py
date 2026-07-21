@@ -16,7 +16,7 @@ from torch import nn
 from minirl.algos import GRPOConfig, SFTConfig, grpo_loss, sft_loss
 from minirl.rollout.batching import iter_microbatches, iter_minibatches, make_batch
 from minirl.rollout.types import Trajectory
-from minirl.train import TrainConfig, Trainer, gather_logprobs
+from tests.fake_trainer import TrainConfig, Trainer, gather_logprobs
 
 VOCAB = 61
 

@@ -1,13 +1,21 @@
-"""The generic step engine: ONE trainer for SFT and every RL loss, on one GPU
-or many (world=1 is the degenerate case of the DDP loop).
+"""THE TEST FAKE trainer — the executable spec of the trainer contract.
 
-Owns exactly the algorithm-agnostic parts:
-forward -> gather_logprobs -> loss_map -> ONE global aggregation -> backward,
-with microbatch gradient accumulation, grad clipping, AdamW, NaN guard, and
-the tier-1 rule: old_logprobs are recomputed
-UNCONDITIONALLY at the start of every update phase (correct for ppo_epochs>1
-in sync, mandatory under async staleness; slime's use_rollout_logprobs=False
-default path).
+This WAS minirl/train/trainer.py (the real DDP trainer) until 2026-07-20,
+when Megatron-Core replaced it as the training engine (minirl/megatron.py).
+Megatron cannot import on macOS, so this pure-torch implementation demotes
+to tests/: controller/algo/data tests drive it on CPU in seconds, and it
+pins the semantics the Megatron adapter must reproduce on the box —
+the trainer duck-type consumed by controllers/fully_async.py:
+
+    fit_batch(batch) -> metrics        compute_logprobs(batch) -> (B, T) f32
+    hf_named_tensors() -> iterable     rank / world / loss_cfg
+
+plus the math laws: ONE global aggregation with a minibatch-global
+denominator, microbatch-split invariance, unconditional old_logprob
+recompute at update start, the NaN skip guard, and gather_logprobs'
+alignment convention (out[:, t] scores token t; position 0 is 0.0) — the
+reference the Megatron fused-CE shift adapter is parity-tested against.
+Recipes 03/04 also import it as the runs-anywhere demo/diagnostic learner.
 
 DISTRIBUTED: if torch.distributed is initialized at
 construction, the model is DDP-wrapped and step() becomes data-parallel —
@@ -35,7 +43,6 @@ style, bf16 params + fp32 masters (an autocast variant existed until
 The fp32 islands (logprobs, aggregation, optimizer) hold regardless.
 """
 
-import os
 from contextlib import nullcontext
 from dataclasses import dataclass
 
@@ -48,21 +55,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from minirl.algos.aggregate import aggregate_loss, minibatch_denom
 from minirl.rollout.batching import iter_microbatches, iter_minibatches, slice_batch
 from minirl.rollout.types import Batch
-
-
-def setup_distributed(backend: str | None = None) -> tuple[int, int]:
-    """Join the process group IF a launcher started us. -> (rank, world).
-
-    torchrun / mp.spawn set RANK et al.; plain `python recipe.py` sets
-    nothing and gets (0, 1) with no process group — the same script serves
-    both launch modes. Call BEFORE constructing the Trainer — it reads dist
-    state at __init__.
-    """
-    if not dist.is_initialized():
-        if "RANK" not in os.environ:  # no launcher: single process, no dist
-            return 0, 1
-        dist.init_process_group(backend or ("nccl" if torch.cuda.is_available() else "gloo"))
-    return dist.get_rank(), dist.get_world_size()
 
 
 def gather_logprobs(logits: Tensor, input_ids: Tensor) -> Tensor:
@@ -104,8 +96,8 @@ class Trainer:
     """fit_batch(batch) runs one update phase: recompute old_logprobs, then
     ppo_epochs x shuffled minibatches x microbatch-accumulated optimizer steps.
 
-    Works on 1..m GPUs from one code path: construct AFTER setup_distributed()
-    under torchrun and DDP engages automatically; without a process group it
+    Works on 1..m GPUs from one code path: construct AFTER the process group
+    exists and DDP engages automatically; without a process group it
     is the plain single-device trainer. `self.model` is always the RAW module
     (clean state_dict names; no-grad code skips the wrapper); `self.ddp` is
     the training-forward module — the DDP wrapper at world>1, the raw module
@@ -254,6 +246,14 @@ class Trainer:
         }
         out |= {"loss": total_loss, "grad_norm": float(grad_norm), "lr": self.cfg.lr}
         return out
+
+    def hf_named_tensors(self):
+        """Publish source: (hf_name, cpu_tensor) pairs of the CURRENT weights.
+
+        The contract mirrors what Megatron-Bridge's export_hf_weights yields
+        on the real trainer; here the raw module's state_dict already IS
+        HF-named."""
+        return ((k, v.detach().cpu()) for k, v in self.model.state_dict().items())
 
     # ---------------- logprob recompute (pi_old, and reusable for pi_ref) ----------------
 

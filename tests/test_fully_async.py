@@ -24,7 +24,7 @@ from minirl.config import CollectConfig, PlacementConfig
 from minirl.controllers import collect_groups_dp, fit_async
 from minirl.engine import StreamAdapter
 from minirl.rollout.types import SamplingParams, Trajectory
-from minirl.train import TrainConfig, Trainer
+from tests.fake_trainer import TrainConfig, Trainer
 
 VOCAB = 61
 SAMPLING = SamplingParams(max_new_tokens=5, n=2)
