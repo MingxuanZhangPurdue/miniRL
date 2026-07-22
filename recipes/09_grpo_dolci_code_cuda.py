@@ -105,6 +105,11 @@ def main() -> None:
     ap.add_argument("--n-samples-per-prompt", type=int, default=8)  # G
     ap.add_argument("--rollout-batch-size", type=int, default=8)    # prompts per batch; B = G * this
     ap.add_argument("--rollout-max-response-len", type=int, default=1024)  # code needs room
+    ap.add_argument("--rollout-max-prompt-len", type=int, default=2048,
+                    help="DROP dataset rows whose templated prompt exceeds this")
+    ap.add_argument("--rollout-max-context-len", type=int, default=4096,
+                    help="the engines' context ceiling (vLLM max_model_len); generation "
+                         "truncates at this wall regardless of the response cap")
     ap.add_argument("--lr", type=float, default=1e-6)
     ap.add_argument("--fp32", action="store_true",
                     help="disable bf16 (Megatron's default precision mode) — parity/debug runs only")
@@ -126,6 +131,10 @@ def main() -> None:
     ap.add_argument("--name", default=None)
     ap.add_argument("--entity", default=None)
     args = ap.parse_args()
+    assert args.rollout_max_prompt_len <= args.rollout_max_context_len - 1, (
+        f"rollout_max_prompt_len ({args.rollout_max_prompt_len}) must leave at least one "
+        f"token of context ({args.rollout_max_context_len}) to generate and compute loss on"
+    )
 
     placement = PlacementConfig(num_train_gpus=args.train_gpus, num_rollout_gpus=args.rollout_gpus)
     rank, world = setup_distributed()  # nccl on CUDA; BEFORE the trainer, see banner
@@ -149,6 +158,7 @@ def main() -> None:
     )
     data_cfg = DataConfig(prompt_data="allenai/Dolci-RL-Zero-Code-7B",
                           input_key="prompt", label_key="ground_truth",
+                          rollout_max_prompt_len=args.rollout_max_prompt_len,
                           enable_thinking=args.enable_thinking)
 
     # trainer FIRST: Megatron initializes model parallelism + the CUDA
@@ -158,7 +168,9 @@ def main() -> None:
     engines, prompt_source, reward_fn, run = [], None, None, None
     eval_sets, eval_cfg = [], None
     if rank == 0:
-        engines = [VLLMEngine(MODEL, gpu_id=g, seed=g) for g in placement.rollout_gpu_ids]
+        engines = [VLLMEngine(MODEL, gpu_id=g, seed=g,
+                              max_model_len=args.rollout_max_context_len)
+                   for g in placement.rollout_gpu_ids]
         tok = AutoTokenizer.from_pretrained(MODEL)
         ds = load_dataset(data_cfg.prompt_data, split="train").filter(is_assert_style)
         print(f"dataset: {len(ds)} assert-style rows (stdin/stdout rows filtered out)")
@@ -169,7 +181,8 @@ def main() -> None:
             eval_sets = [EvalSet("mbpp_test",
                                  make_eval_prompts(mbpp, tok, mbpp_row,
                                                    enable_thinking=data_cfg.enable_thinking,
-                                                   limit=args.eval_limit),
+                                                   limit=args.eval_limit,
+                                                   max_prompt_len=data_cfg.rollout_max_prompt_len),
                                  reward_fn)]
             eval_cfg = EvalConfig(eval_interval=args.eval_interval, eval_max_response_len=512)
         if args.wandb:

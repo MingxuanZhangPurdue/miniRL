@@ -105,6 +105,10 @@ class DataConfig:
     input_key: str = "input"  # row key -> the user message
     label_key: str | None = None  # row key -> meta["label"] (the reward's gold answer)
     apply_chat_template: bool = True
+    rollout_max_prompt_len: int | None = None  # rows whose TEMPLATED prompt exceeds
+    #   this are DROPPED at load (never truncated — a truncated problem statement
+    #   makes the reward grade answers to a question the model never saw).
+    #   Pair it with the engine's max_model_len so every prompt leaves response room.
     enable_thinking: bool = False  # False pre-fills an empty <think></think> in the
     #   generation prompt (short-answer regime); True lets the model generate its
     #   reasoning as RESPONSE tokens — trained on, decoded by the reward, and

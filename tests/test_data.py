@@ -142,6 +142,28 @@ def test_prompt_source_deterministic(tok):
     assert a == b
 
 
+def test_over_length_prompts_are_dropped_not_truncated(tok):
+    ds = FakeDataset([{"question": "q", "answer": "short"},
+                      {"question": "word " * 500, "answer": "long"},
+                      {"question": "q2", "answer": "short2"}])
+    cfg = DataConfig(prompt_data="fake", input_key="question", label_key="answer",
+                     rollout_max_prompt_len=64, rollout_shuffle=False)
+    src = HFPromptSource(ds, tok, cfg)
+    assert src.n_filtered == 1 and len(src.order) == 2
+    labels = [m["label"] for _, m in src(3)]  # asks for 3, epoch holds only 2 kept
+    assert labels == ["short", "short2"]  # the long row is gone, others intact
+
+
+def test_eval_prompts_respect_max_prompt_len(tok):
+    from minirl.eval import make_eval_prompts
+    from minirl.data.prompts import keyed_row_fn
+
+    ds = FakeDataset([{"question": "q", "answer": "a"},
+                      {"question": "word " * 500, "answer": "b"}])
+    out = make_eval_prompts(ds, tok, keyed_row_fn("question", "answer"), max_prompt_len=64)
+    assert [m["label"] for _, m in out] == ["a"]
+
+
 def test_enable_thinking_flows_from_data_config(tok):
     ds = FakeDataset([{"question": "q", "answer": "1"}])
     off = HFPromptSource(ds, tok, GSM8K_CFG)(1)[0][0]

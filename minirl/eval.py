@@ -36,17 +36,23 @@ class EvalSet:
 
 
 def make_eval_prompts(dataset, tokenizer, row_fn, enable_thinking: bool = False,
-                      limit: int | None = None) -> list:
+                      limit: int | None = None, max_prompt_len: int | None = None) -> list:
     """Tokenize a whole eval split into the fixed [(ids, meta)] list.
 
     row_fn is the same adapter shape the training prompt source uses
-    (data/prompts.py); limit caps the set for cheap periodic evals.
+    (data/prompts.py); limit caps how many KEPT prompts the set holds, and
+    max_prompt_len drops (never truncates) over-length prompts — also the
+    guard against prompts that would overflow the engine's max_model_len.
     """
-    n = len(dataset) if limit is None else min(limit, len(dataset))
     out = []
-    for i in range(n):
+    for i in range(len(dataset)):
+        if limit is not None and len(out) >= limit:
+            break
         messages, meta = row_fn(dataset[i])
-        out.append((encode_prompt(tokenizer, messages, enable_thinking), meta))
+        ids = encode_prompt(tokenizer, messages, enable_thinking)
+        if max_prompt_len is not None and ids.numel() > max_prompt_len:
+            continue
+        out.append((ids, meta))
     return out
 
 

@@ -49,6 +49,9 @@ one helper bridges them.
     input_key            --input-key             "input"
     label_key            --label-key             None
     apply_chat_template  --apply-chat-template   True
+    rollout_max_prompt_len  --rollout-max-prompt-len   None (rows over it are
+                            DROPPED at load, never truncated — a mangled
+                            problem statement makes its reward gradient noise)
     enable_thinking      --apply-chat-template-kwargs '{"enable_thinking": ...}'   False
     rollout_shuffle      --rollout-shuffle       True
     rollout_seed         --rollout-seed          0

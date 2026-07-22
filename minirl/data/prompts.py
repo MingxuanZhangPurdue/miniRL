@@ -72,6 +72,21 @@ class HFPromptSource:
         self.row_fn = row_fn if row_fn is not None else keyed_row_fn(cfg.input_key, cfg.label_key)
         self.enable_thinking = cfg.enable_thinking
         self.order = list(range(len(dataset)))  # this epoch's visit order
+        self.n_filtered = 0
+        if cfg.rollout_max_prompt_len is not None:
+            # one tokenization pass at load; over-length rows are DROPPED, not
+            # truncated — a mangled problem statement would turn its reward
+            # into gradient noise
+            self.order = [
+                i for i in self.order
+                if encode_prompt(tokenizer, self.row_fn(dataset[i])[0],
+                                 self.enable_thinking).numel() <= cfg.rollout_max_prompt_len
+            ]
+            self.n_filtered = len(dataset) - len(self.order)
+            if self.n_filtered:
+                print(f"prompt filter: dropped {self.n_filtered}/{len(dataset)} rows "
+                      f"over {cfg.rollout_max_prompt_len} tokens", flush=True)
+            assert self.order, "every prompt exceeds rollout_max_prompt_len"
         self.rng = random.Random(cfg.rollout_seed)
         if cfg.rollout_shuffle:
             self.rng.shuffle(self.order)
