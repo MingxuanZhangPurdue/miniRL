@@ -24,7 +24,7 @@ class SamplingParams:
       stash(group) / drain() / n_inflight / pad_id;
       load_weights(named_tensors: iterable[(str, Tensor)], version: int) -> None
           (drain first — asserted; every completion sees exactly ONE version).
-    VLLMEngine (engine/vllm_engine.py) is THE engine.
+    VLLMEngine (minirl/vllm_engine.py) is THE engine.
     """
 
     temperature: float = 1.0

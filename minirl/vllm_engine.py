@@ -31,17 +31,29 @@ Platform notes (spike findings):
     the trainer assumes, rollout/types.py) must be verified on the first
     real run — vLLM configs differ on stop-token inclusion.
     recipes/04_smoke_vllm_cuda.py is the check (PASSED A100 2026-07-20).
+  - WSL2 (Docker Desktop GPU passthrough): no UVA, so vLLM's V2 model
+    runner cannot init — __init__ detects WSL and defaults the V1 runner
+    (VLLM_USE_V2_MODEL_RUNNER=0). Real Linux keeps V2.
 
-vLLM imports live inside methods so this module imports cleanly in
-environments without vLLM (the repo test env); instantiating needs the vLLM
-env (Mac: ~/.venv-vllm-metal).
+Imports are file-level: this module only imports where vLLM is installed —
+the vLLM env (box: /opt/vllm-env in the container; Mac: ~/.venv-vllm-metal)
+— exactly like minirl/megatron.py only imports where megatron does. The one
+exception is mlx inside _metal_apply_weights_from_file, which executes
+INSIDE the Metal worker process, never here.
 """
 
 import os
+import platform
 import tempfile
 
 import torch
+from safetensors.torch import save_file
 from torch import Tensor
+from transformers import AutoTokenizer
+from vllm import EngineArgs, LLMEngine
+from vllm import SamplingParams as VSP
+from vllm.inputs import TokensPrompt
+from vllm.platforms import current_platform
 
 from minirl.rollout.types import SamplingParams, Trajectory
 
@@ -56,9 +68,10 @@ class VLLMEngine:
         max_model_len: int = 4096,
         seed: int = 0,  # DP fleets: give each engine a different seed (uncorrelated sampling)
         gpu_id: int | None = None,  # pin to ONE GPU (DP placement)
+        gpu_memory_utilization: float = 0.9,  # fraction of the GPU vLLM may claim
+        #   (vLLM's own knob/name — lower it when the GPU is shared with a
+        #   desktop or a colocated trainer)
     ):
-        from transformers import AutoTokenizer
-        from vllm import EngineArgs, LLMEngine
 
         # vLLM launches EngineCore as a subprocess via FORK by default, and a
         # forked child cannot re-initialize CUDA. Our ordering rule (§11)
@@ -67,6 +80,11 @@ class VLLMEngine:
         # A100 box, 2026-07-20). Safe: recipes guard __main__, and the
         # CUDA_VISIBLE_DEVICES pinning below inherits through spawn the same.
         os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        # WSL2's GPU passthrough has no UVA (unified addressing), which
+        # vLLM's V2 model runner requires at init — fall back to the V1
+        # runner there. Real Linux boxes keep the default.
+        if "microsoft" in platform.uname().release.lower():
+            os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
         self.model_name_or_path = model_name_or_path
         # GPU pinning by env (§10(a)): the V1 EngineCore SUBPROCESS spawned
         # inside from_engine_args inherits CUDA_VISIBLE_DEVICES; the parent's
@@ -79,7 +97,8 @@ class VLLMEngine:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         try:
             self.engine = LLMEngine.from_engine_args(
-                EngineArgs(model=model_name_or_path, dtype=dtype, max_model_len=max_model_len, seed=seed)
+                EngineArgs(model=model_name_or_path, dtype=dtype, max_model_len=max_model_len,
+                           seed=seed, gpu_memory_utilization=gpu_memory_utilization)
             )
         finally:
             if gpu_id is not None:
@@ -116,9 +135,6 @@ class VLLMEngine:
         group before all G siblings exist. Children
         prefill on the next step, in whatever slots are free.
         """
-        from vllm import SamplingParams as VSP
-        from vllm.inputs import TokensPrompt
-
         gid = f"req-{self._next_id}"
         self._next_id += 1
         group = {
@@ -143,6 +159,13 @@ class VLLMEngine:
                     top_k=params.top_k,
                     max_tokens=params.max_new_tokens,
                     logprobs=0,  # attach the SAMPLED token's logprob, computed at sampling time
+                    # Token ids are the single source of truth: trajectories
+                    # carry ids only, and rewards decode the response slice
+                    # themselves — nothing reads RequestOutput.text, so skip
+                    # the engine's incremental detokenization. (Safe because
+                    # we stop on token ids, never on stop STRINGS, which
+                    # would need the running text.)
+                    detokenize=False,
                 ),
             )
         return gid
@@ -205,9 +228,6 @@ class VLLMEngine:
             from the parameter tree).
         """
         assert not self._pending, "load_weights during in-flight generation (drain first)"
-        from safetensors.torch import save_file
-        from vllm.platforms import current_platform
-
         # Ship each STORAGE once: tied weights (Qwen: lm_head <- embed_tokens)
         # are aliases, and safetensors refuses aliased tensors (found on the
         # A100 box 2026-07-20; the Mac never saw it — MPS->CPU moves broke the

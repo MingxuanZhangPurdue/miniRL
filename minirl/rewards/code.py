@@ -95,3 +95,18 @@ def code_reward(response_text: str, tests: str, timeout_s: float = 10.0) -> floa
         return 0.0
     ok, _ = run_python(code + "\n\n" + tests, timeout_s=timeout_s)
     return float(ok)
+
+
+def make_code_reward_fn(tokenizer, label_key: str = "label", timeout_s: float = 10.0):
+    """Glue for the collector: decode the RESPONSE tokens only and run them
+    against the tests in traj.meta["label"] — either one test snippet (str)
+    or a list of assert strings (Dolci/LiveCodeBench style), joined into one
+    program run."""
+
+    def reward_fn(traj) -> float:
+        response = tokenizer.decode(traj.input_ids[traj.prompt_len :], skip_special_tokens=True)
+        label = traj.meta[label_key]
+        tests = "\n".join(label) if isinstance(label, list) else str(label)
+        return code_reward(response, tests, timeout_s=timeout_s)
+
+    return reward_fn

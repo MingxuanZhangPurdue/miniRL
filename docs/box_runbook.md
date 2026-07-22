@@ -79,4 +79,24 @@ recipe and the validated version stack are recorded in megatron.md §5a/§6
 
 That box has ONE GPU: rungs 2-4 above (placement, 1x1 end-to-end, 2+2
 NCCL) still need this runbook's multi-GPU pod, as does Megatron P3 (DP>1).
-The 73-test CPU suite also passes inside the container (~70s).
+The CPU suite also passes inside the container.
+
+## 7. vLLM on the Windows box (2026-07-21)
+
+The engine runs in the SAME container in an isolated venv — vLLM's pinned
+torch (2.11+cu130) must not replace the NGC torch the Megatron stack is
+validated on (the Mac's vllm-metal split, container edition):
+
+      docker exec minirl-mega python -m venv /opt/vllm-env
+      docker exec minirl-mega /opt/vllm-env/bin/pip install vllm   # 0.25.1 validated
+      docker exec -w /workspace/miniRL -e PYTHONPATH=/workspace/miniRL \
+          minirl-mega /opt/vllm-env/bin/python recipes/04_smoke_vllm_cuda.py
+
+Findings (first engine run on this box, RTX 5070): WSL2 passthrough has NO
+UVA, so vLLM 0.25's V2 model runner dies at init ("UVA is not available")
+— VLLMEngine.__init__ detects WSL and falls back to the V1 runner.
+Detokenize parity measured: vLLM's .text is byte-identical to
+tokenizer.decode(response ids, skip_special_tokens=True) on every sampled
+completion, and detokenize=False (the production setting) generates
+ids+logprobs with no text — the trajectories lose nothing. Unified
+trainer+engine env (runbook §0's one-env rule) stays a real-pod concern.

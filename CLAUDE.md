@@ -32,6 +32,9 @@ anything (`platform`/`uname`):
   Start Docker Desktop first, then:
   `docker start minirl-mega`, and run things via
   `docker exec -w /workspace/miniRL -e PYTHONPATH=/workspace/miniRL minirl-mega python ...`
+  vLLM lives in the SAME container in an isolated venv —
+  `/opt/vllm-env/bin/python` (its pinned torch must not replace the NGC
+  torch; docs/box_runbook.md §7, incl. the WSL2 no-UVA fallback).
 - Tests: `<that python> -m pytest tests/ -q` — keep it green; it is fast
   (~10s Mac CPU, ~15s in the container).
 - The Mac is MPS + CPU only. THE trainer is
@@ -56,8 +59,11 @@ anything (`platform`/`uname`):
    classes/protocols/registries/string-path plugins; plain callables and the
    file-vs-config rule (an algorithm gets its own file only if its loss BODY
    differs from GRPO's; otherwise it is a named config in `LOSSES`).
-2. **Docs before code**: new subsystems get a `docs/*.md` design note first;
-   code must match the doc or the doc gets updated.
+2. **Docs are REFERENCE, not law** (relaxed 2026-07-21; was "docs before
+   code"): `docs/*.md` exist to help understanding — consult them for
+   context, but do not treat them as binding specs, and do not spend effort
+   keeping every doc in lockstep with every change. Update a doc when it
+   genuinely helps a future reader; skip the ceremony otherwise.
 3. **Algorithm files follow the user's rl_notes annotation style** (banner,
    LOSS formula block + NOTATION legend, WHAT-CHANGES tables, FROZEN/grad
    marks, shape comments on every tensor line) — see any file in

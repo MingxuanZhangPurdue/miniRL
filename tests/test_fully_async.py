@@ -430,8 +430,6 @@ def test_placement_layout_is_slimes():
     assert q.train_gpu_ids == [0] and q.rollout_gpu_ids == [1]
 
 
-def test_vllm_engine_module_imports_without_vllm():
-    # all vLLM imports are method-local: the module must import in this env
-    import minirl.engine.vllm_engine as m
-
-    assert hasattr(m, "VLLMEngine") and hasattr(m, "_metal_apply_weights_from_file")
+# (minirl/vllm_engine.py now imports vllm at FILE level, mirroring
+# minirl/megatron.py: it only imports inside a vLLM env, so no CPU-suite
+# import test exists for it — the on-box smoke, recipe 04, is its gate.)

@@ -7,7 +7,10 @@ import torch
 
 from minirl.config import RolloutConfig
 from minirl.controllers import collect_groups_dp
-from minirl.rewards import code_reward, extract_code, extract_final_answer, grade_answer, math_reward, run_python
+from minirl.rewards import (
+    code_reward, extract_code, extract_final_answer, grade_answer,
+    make_code_reward_fn, math_reward, run_python,
+)
 from minirl.rewards.math import extract_boxed
 from minirl.rollout.types import SamplingParams, Trajectory
 
@@ -71,6 +74,28 @@ def test_code_reward_pass_and_fail():
     assert code_reward(bad, tests) == 0.0  # assertion fails -> nonzero exit
     assert code_reward(broken, tests) == 0.0  # syntax error
     assert code_reward("no fence", tests) == 0.0  # format is part of the spec
+
+
+def test_make_code_reward_fn_joins_list_labels():
+    """The Dolci shape: meta["label"] is a LIST of assert strings."""
+
+    class StubTok:
+        def __init__(self, response):
+            self.response = response
+
+        def decode(self, ids, skip_special_tokens=True):
+            return self.response
+
+    def traj(label):
+        mask = torch.tensor([False, True, True])  # prompt_len = 1
+        return Trajectory(input_ids=torch.tensor([1, 2, 3]), loss_mask=mask,
+                          logprobs=torch.zeros(3), meta={"label": label})
+
+    good = "```python\ndef mul(a, n):\n    return a * n\n```"
+    asserts = ["assert mul(2, 3) == 6", "assert mul(0, 5) == 0"]
+    assert make_code_reward_fn(StubTok(good))(traj(asserts)) == 1.0
+    assert make_code_reward_fn(StubTok(good))(traj(["assert mul(2, 3) == 7"])) == 0.0
+    assert make_code_reward_fn(StubTok(good))(traj("assert mul(4, 4) == 16")) == 1.0  # str label too
 
 
 def test_sandbox_kills_infinite_loop_quickly():

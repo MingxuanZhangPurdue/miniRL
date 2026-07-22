@@ -24,7 +24,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from minirl.engine.vllm_engine import VLLMEngine
+from minirl.vllm_engine import VLLMEngine
 from minirl.rollout.types import SamplingParams
 from tests.fake_trainer import Trainer, TrainConfig, gather_logprobs  # noqa: F401 — diagnostic learner (the spec fake)
 

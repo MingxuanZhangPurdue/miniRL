@@ -214,20 +214,17 @@ miniRL/
 │   │   └── value_head.py        # scalar head wrapping the HF model (reward model only —
 │   │                            #   no critic: PPO is out of scope, see non-goals)
 │   │
-│   ├── engine/                  # rollout backends, pluggable (≈ verl's rollout worker)
-│   │   │                        # engines are duck-typed on the STREAMING contract:
-│   │   │                        #   submit/poll/stash/drain/n_inflight + load_weights
-│   │   │                        #   + pad_id; sampling side on rollout/types.SamplingParams
-│   │   ├── vllm_engine.py       # [done] PRIMARY backend: low-level LLMEngine step loop
-│   │   │                        #   (continuous batching); the streaming interface
-│   │   │                        #   only; gpu_id pinning for DP placement (§11);
-│   │   │                        #   weight updates via callable RPC + safetensors path
-│   │   │                        #   (Metal recipe validated, CUDA branch awaits box;
-│   │   │                        #   docs/async_tier2.md §8); Mac: vllm-metal venv
-│   │   │                        # (hf_engine.py + stream_adapter.py REMOVED
-│   │   │                        #   2026-07-20 — vLLM-only; the streaming
-│   │   │                        #   contract's executable spec is the fake in
-│   │   │                        #   tests/test_fully_async.py)
+│   ├── vllm_engine.py           # [done] THE engine (vLLM-only; flattened out of the
+│   │                            #   engine/ folder 2026-07-21). Duck-typed on the
+│   │                            #   STREAMING contract: submit/poll/stash/drain/
+│   │                            #   n_inflight + load_weights + pad_id; low-level
+│   │                            #   LLMEngine step loop (continuous batching);
+│   │                            #   gpu_id pinning for DP placement (§11); native
+│   │                            #   reload_weights publish (Metal: custom recipe).
+│   │                            #   File-level vllm imports — vLLM env only, like
+│   │                            #   megatron.py. Contract spec: the fake in
+│   │                            #   tests/test_fully_async.py. (hf_engine.py +
+│   │                            #   stream_adapter.py REMOVED 2026-07-20 — vLLM-only)
 │   │
 │   ├── data/                    # HF `datasets` does loading/caching/splits — we only
 │   │   │                        #   turn rows into the 3 shapes the repo already defines.
@@ -336,8 +333,12 @@ miniRL/
 │   │                            #   torchrun + PlacementConfig (docs/box_runbook.md)
 │   ├── 06_agentic_tooluse.py    # (planned) multi-turn tool-use RL
 │   ├── 07_onpolicy_distill.py   # (planned) MOPD-lite from a larger teacher
-│   └── 08_megatron_p1_parity.py # [done 2026-07-20] Megatron-vs-fake_trainer parity
-│                                #   on a frozen batch (megatron.md §7 P1, §5a box)
+│   ├── 08_megatron_p1_parity.py # [done 2026-07-20] Megatron-vs-fake_trainer parity
+│   │                            #   on a frozen batch (megatron.md §7 P1, §5a box)
+│   └── 09_grpo_dolci_code_cuda.py # [done 2026-07-21, needs box run] code RLVR on
+│                                #   allenai/Dolci-RL-Zero-Code-7B (6.7k assert-style
+│                                #   rows; stdin/stdout rows filtered) -> sandboxed
+│                                #   code_reward; data+reward path validated on-box
 │
 ├── configs/                     # one YAML per experiment
 │   ├── sft_qwen06b.yaml
