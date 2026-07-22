@@ -40,7 +40,7 @@ def make_batch(
     over the collated batch, so its recipe overwrites batch.advantages).
     DPO never comes through here (paired collation, data/preference.py).
 
-    Expects traj.meta["group_id"] (set by the collector, controllers/fully_async.collect_groups_dp);
+    Expects traj.meta["group_id"] (set by the collector, train_async.collect_groups_dp);
     rows without one become singleton groups (advantage 0 under GRPO).
 
     Returns (batch, stats) where stats carries collation health metrics

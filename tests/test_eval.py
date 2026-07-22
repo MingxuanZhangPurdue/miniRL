@@ -11,10 +11,10 @@ import pytest
 import torch
 
 from minirl.config import EvalConfig
-from minirl.fully_async import fit_async
+from minirl.train_async import fit_async
 from minirl.eval import EvalSet, run_eval
 from tests.fake_trainer import TrainConfig, Trainer
-from tests.test_fully_async import FILTER_CFG, VOCAB, FakeStreamEngine, TinyLM, fresh, parity_reward
+from tests.test_train_async import FILTER_CFG, VOCAB, FakeStreamEngine, TinyLM, fresh, parity_reward
 
 from minirl.algos import GRPOConfig, grpo_loss  # noqa: E402
 

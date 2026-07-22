@@ -1,4 +1,4 @@
-"""fully_async controller tests — CPU only, no vLLM, no GPUs.
+"""train_async controller tests — CPU only, no vLLM, no GPUs.
 
 Consolidates the retired test_streaming.py + test_data_parallel.py
 suites: a FakeStreamEngine (deterministic, poll-driven, version-stamping,
@@ -20,7 +20,7 @@ from torch import nn
 
 from minirl.algos import GRPOConfig, grpo_loss
 from minirl.config import PlacementConfig, RolloutConfig
-from minirl.fully_async import collect_groups_dp, fit_async
+from minirl.train_async import collect_groups_dp, fit_async
 from minirl.rollout.types import SamplingParams, Trajectory
 from tests.fake_trainer import TrainConfig, Trainer
 

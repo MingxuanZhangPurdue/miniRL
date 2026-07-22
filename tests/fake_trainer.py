@@ -5,7 +5,7 @@ when Megatron-Core replaced it as the training engine (minirl/megatron.py).
 Megatron cannot import on macOS, so this pure-torch implementation demotes
 to tests/: controller/algo/data tests drive it on CPU in seconds, and it
 pins the semantics the Megatron adapter must reproduce on the box —
-the trainer duck-type consumed by controllers/fully_async.py:
+the trainer duck-type consumed by train_async.py:
 
     fit_batch(batch) -> metrics        compute_logprobs(batch) -> (B, T) f32
     hf_named_tensors() -> iterable     rank / world / loss_cfg

@@ -16,7 +16,7 @@ class SamplingParams:
     """Request side of the engine contract (field names mirror vllm.SamplingParams).
 
     Engines are duck-typed — no base class. An engine is any object speaking
-    the STREAMING contract consumed by controllers/fully_async.py:
+    the STREAMING contract consumed by train_async.py:
       submit(prompt_ids: (T,) int64, params, meta) -> request id — ONE prompt,
           a whole group of params.n completions;
       poll() -> list[list[Trajectory]] — finished GROUPS, each trajectory

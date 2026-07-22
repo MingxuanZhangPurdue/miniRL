@@ -8,7 +8,7 @@ implement none of it, we only keep it fed).
 
 One interface: the streaming contract — submit() / poll() / stash() /
 drain() / n_inflight / load_weights / pad_id — consumed by
-controllers/fully_async.py (collect_groups_dp drives poll() directly).
+train_async.py (collect_groups_dp drives poll() directly).
 (A blocking tier-1 generate() existed until 2026-07-16; it retired with the
 round-based controller. The generate()-engine on-ramp — HFEngine +
 StreamAdapter — retired 2026-07-20 with the vLLM-only decision.)

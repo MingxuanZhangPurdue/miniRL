@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from minirl.algos import GRPOConfig, grpo_loss
 from minirl.config import DataConfig, EvalConfig, PlacementConfig, RolloutConfig
-from minirl.fully_async import fit_async
+from minirl.train_async import fit_async
 from minirl.data import HFPromptSource
 from minirl.eval import EvalSet, make_eval_prompts
 from minirl.vllm_engine import VLLMEngine

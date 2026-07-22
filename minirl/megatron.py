@@ -4,7 +4,7 @@ build), so this MODULE only imports on the box (only the box recipes import
 it) and the local test suite drives tests/fake_trainer.py (the executable
 spec of the same contract) instead.
 
-The trainer duck-type consumed by controllers/fully_async.py:
+The trainer duck-type consumed by train_async.py:
 
     fit_batch(batch) -> metrics        compute_logprobs(batch) -> (B, T) f32
     hf_named_tensors() -> iterable     rank / world / loss_cfg

@@ -38,7 +38,7 @@ class PlacementConfig:
 @dataclass(frozen=True)
 class RolloutConfig:
     """Generation + collection for one training batch: sampling knobs and
-    batch shape in one object (controllers/fully_async). sampling_params()
+    batch shape in one object (train_async). sampling_params()
     derives the engine wire-type — field names here follow slime; the wire
     type mirrors vllm.SamplingParams.
     """

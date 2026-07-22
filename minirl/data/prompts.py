@@ -1,5 +1,5 @@
 """RL prompt sources over HF datasets — the (n) -> [(ids, meta)] callable that
-the collector consumes (controllers/fully_async.collect_groups_dp). HF `datasets` owns loading,
+the collector consumes (train_async.collect_groups_dp). HF `datasets` owns loading,
 caching, and splits; we only shuffle, adapt rows, and hand out tokenized
 prompts with their labels in meta.
 """

@@ -4,7 +4,7 @@ Home of the collection-time callables shared by collectors and recipes. The
 round-based collector that originally lived beside these (rollout/sampling.py,
 collect_groups) was retired 2026-07-14: collection is continuous-batching for
 sync AND async training alike, so the one collector
-is controllers/fully_async.collect_groups_dp.
+is train_async.collect_groups_dp.
 """
 
 import math
