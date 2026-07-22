@@ -23,7 +23,7 @@ that together form a miniature version of production frameworks like
 **Built and tested (74 passing tests, all CPU/MPS):** the full RLVR stack —
 `VLLMEngine`, THE rollout engine (vLLM-only decision 2026-07-20: HFEngine
 and its StreamAdapter REMOVED — the streaming contract is now pinned by
-tests/test_fully_async.py's FakeStreamEngine, and the fp32-oracle duty
+tests/test_train_async.py's FakeStreamEngine, and the fp32-oracle duty
 lives in recipe 04's raw HF forward; continuous batching; Metal
 weight-update recipe validated, CUDA smoke PASSED 2026-07-20), losses
 grpo/gspo/cispo/sft as
@@ -51,7 +51,7 @@ sources, SFT batching), the GSM8K GRPO recipe
 (`recipes/05_grpo_gsm8k_cuda.py`; the MPS recipe 03 was REMOVED 2026-07-20
 with HFEngine — vLLM-only), and **THE
 fully-async controller** (2026-07-14 consolidation, docs/async_tier2.md
-§10-§11: `fully_async.py` — fit_async + collect_groups_dp; k DP
+§10-§11: `train_async.py` — fit_async + collect_groups_dp; k DP
 engines via shared dealer/tally with burst-capped deals, one owner thread
 per engine, drain-ALL-then-publish, staleness ≤ publish_interval + 1; 1..m
 trainer ranks — rank 0 collects + broadcasts + publishes from its own
@@ -60,7 +60,7 @@ dynamic sampling filters in
 `rollout/filtering.py`; `PlacementConfig` + `VLLMEngine(gpu_id=...)` for the
 single-node GPU split, slime's layout). Retired the same day: round_based /
 streaming controllers, rollout/sampling + rollout/streaming collectors
-(every one a k=1 special case of fully_async). REMAINING on-box: real
+(every one a k=1 special case of train_async). REMAINING on-box: real
 vllm-metal smoke (EOS parity + weight canary), per-engine GPU pinning spike
 (§10a) and NCCL — the CUDA engine smoke PASSED 2026-07-20 (weight canary, EOS
 parity, logprob gap; findings: EngineCore fork->spawn, tied-weight dedupe, V1
@@ -194,7 +194,7 @@ miniRL/
 │   │                            #   wandb injected by RECIPES, never imported by core
 │   │                            #   (renamed from logging.py 2026-07-22 — stdlib shadow)
 │   │
-│   ├── fully_async.py           # [done] THE controller (flattened out of controllers/
+│   ├── train_async.py           # [done] THE controller (flattened out of controllers/
 │   │                            #   2026-07-22): fit_async + collect_groups_dp —
 │   │                            #   k DP engines (shared dealer + tally, burst-capped
 │   │                            #   deals, one owner thread per engine), 1..m trainer
@@ -227,7 +227,7 @@ miniRL/
 │   │                            #   reload_weights publish.
 │   │                            #   File-level vllm imports — vLLM env only, like
 │   │                            #   megatron.py. Contract spec: the fake in
-│   │                            #   tests/test_fully_async.py. (hf_engine.py +
+│   │                            #   tests/test_train_async.py. (hf_engine.py +
 │   │                            #   stream_adapter.py REMOVED 2026-07-20 — vLLM-only)
 │   │
 │   ├── data/                    # HF `datasets` does loading/caching/splits — we only
@@ -288,7 +288,7 @@ miniRL/
 │   │   │                        #   the loss — algos/ never sees it (packing.md §1a)
 │   │   ├── filtering.py         # [done] group filters (reward_nonzero_std = DAPO dynamic
 │   │   │                        #   sampling) + RewardFn/GroupFilter types. Collection
-│   │   │                        #   itself lives in fully_async.py —
+│   │   │                        #   itself lives in train_async.py —
 │   │   │                        #   sampling.py and streaming.py retired 2026-07-14 (§11)
 │   │   ├── buffer.py            # (dropped: tier 2 shipped WITHOUT queues — the engine
 │   │   │                        #   stash + held-future join replaced them)
@@ -482,7 +482,7 @@ loop:
 Simple, on-policy, but the GPU alternates between generation and training —
 exactly the inefficiency GLM-5's async infra removes.
 
-### Asynchronous (`fully_async.py`)
+### Asynchronous (`train_async.py`)
 
 Built in two tiers, mirroring slime (full study + design: docs/async_training.md):
 
@@ -496,7 +496,7 @@ Built in two tiers, mirroring slime (full study + design: docs/async_training.md
 - **Tier 2 — fully async worker pool (later, for agentic/variable-length
   episodes)**: the diagram below — persistent workers, bounded queue,
   abort-and-requeue (or partial-rollout resume) on weight updates; slime's
-  fully_async_rollout / GLM-5 style.
+  fully-async rollout / GLM-5 style.
 
 ```
 ┌──────────────┐  trajectories   ┌────────────┐   batches   ┌─────────────┐
@@ -645,7 +645,7 @@ real frameworks. This table is the contract; keep it updated as code lands.
 | Actor / rollout placement | `rollout/placement.py`: **colocated vs disaggregated** GPU assignment on one node | **colocated vs disaggregated** modes on GPU groups | **hybrid engine**: actor & rollout share GPUs, offload/reload between phases |
 | Weight sync learner → sampler | `rollout/weight_sync.py`: versioned NCCL broadcast (shm fallback on CPU) | bucketed NCCL broadcast (disaggregated) or CUDA IPC (colocated) | `sync_model_weights` / resharding between FSDP and vLLM formats |
 | Data buffer | `rollout/buffer.py` (bounded queue + staleness filter) | Data Buffer module (also the custom-data/partial-rollout hook point) | replay/experience handling inside the trainer loop |
-| Async / off-policy RL | `fully_async.py`, `version` tag + TIS correction | asynchronous training mode; partial rollouts | one-step-off async mode; agent-loop workers |
+| Async / off-policy RL | `train_async.py`, `version` tag + TIS correction | asynchronous training mode; partial rollouts | one-step-off async mode; agent-loop workers |
 | Reward plumbing | `rewards/` fns taking `Trajectory` → float | custom reward via `--custom-rm-path` | `RewardManager` (rule-based fns or RM worker) |
 | Advantage estimators | `algos/advantage.py` (GAE, group-norm, RLOO) | selected per algorithm in training scripts | `core_algos.py` advantage estimator registry (`grpo`, `gae`, `rloo`, ...) |
 | Algorithm zoo | `algos/*.py` one file per loss | PPO/GRPO variants via CLI flags | `ppo`, `grpo`, `dapo`, `rloo`, ... trainer configs |
