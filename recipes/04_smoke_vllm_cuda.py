@@ -16,6 +16,7 @@ Executes the async_tier2.md §7 on-box checklist items in order, fail-loud:
      This is the check that catches the franken-policy failure mode.
 """
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -40,12 +41,16 @@ def greedy(engine, prompt_ids, max_new_tokens=64):
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gpu-memory-utilization", type=float, default=0.9,
+                    help="lower it when the GPU is shared (desktop / colocated trainer)")
+    args = ap.parse_args()
     assert torch.cuda.is_available(), "this smoke needs a CUDA GPU"
     tok = AutoTokenizer.from_pretrained(MODEL)
     prompt_ids = tok(PROMPT, return_tensors="pt").input_ids[0]
 
     print("== 1. streaming contract ==")
-    engine = VLLMEngine(MODEL)
+    engine = VLLMEngine(MODEL, gpu_memory_utilization=args.gpu_memory_utilization)
     engine.load_weights(
         AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.float32).state_dict().items(),
         version=0,
@@ -67,12 +72,23 @@ def main() -> None:
     gc_eos = [gc_eos] if isinstance(gc_eos, int) else list(gc_eos or [])
     eos_ids = set([tok.eos_token_id] + gc_eos)
     finished = [t for t in group if t.input_ids.numel() - prompt_ids.numel() < sampling.max_new_tokens]
+    if not finished:  # every sample hit the cap: force a natural stop so the
+        # check can NEVER pass vacuously. A chat-templated ask stops within a
+        # few tokens (the raw completion-style prompt just loops to the cap).
+        from minirl.data.chat import encode_prompt
+
+        chat_ids = encode_prompt(
+            tok, [{"role": "user", "content": "What is 2+2? Answer with just the number."}]
+        )
+        t = greedy(engine, chat_ids, max_new_tokens=256)
+        assert t.input_ids.numel() - chat_ids.numel() < 256, "forced-finish generation hit the cap"
+        finished = [t]
     for t in finished:
         assert int(t.input_ids[-1]) in eos_ids, (
             f"finished response does not END with eos (last={int(t.input_ids[-1])}) — "
             "stop-token inclusion violates the loss-mask convention; fix engine config before training"
         )
-    print(f"   PASS: {len(finished)}/{len(group)} finished responses include their eos")
+    print(f"   PASS: {len(finished)} finished response(s), every one includes its eos")
 
     print("== 3. engine<->learner logprob gap ==")
     learner = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.float32).cuda().eval()

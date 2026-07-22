@@ -92,6 +92,12 @@ validated on (the Mac's vllm-metal split, container edition):
       docker exec -w /workspace/miniRL -e PYTHONPATH=/workspace/miniRL \
           minirl-mega /opt/vllm-env/bin/python recipes/04_smoke_vllm_cuda.py
 
+Recipe 04 PASSED here 2026-07-22 (vllm 0.25.1, gpu_memory_utilization 0.5):
+all four checks, logprob gap mean 0.016 nats; EOS parity check made
+non-vacuous first (a forced chat-templated completion when every sample
+hits the cap — raw completion-style prompts loop to the cap and never emit
+eos, which had let the check pass on zero finished responses).
+
 Findings (first engine run on this box, RTX 5070): WSL2 passthrough has NO
 UVA, so vLLM 0.25's V2 model runner dies at init ("UVA is not available")
 — VLLMEngine.__init__ detects WSL and falls back to the V1 runner.

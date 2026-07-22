@@ -18,28 +18,20 @@ load_weights REQUIRES a quiescent engine (drain-then-publish, asserted), so
 every completion is generated under exactly ONE weight version — the tier-1
 invariant survives and Trajectory.version stays a scalar.
 
-Platform notes (spike findings):
-  - vllm-metal (Mac): weight updates need BOTH the MLX tree load AND direct
-    per-layer `self_attn._inner` assignments — `load_weights` alone silently
-    skips attention (the paged wrapper hides it from the parameter tree).
-    Callable RPC may need VLLM_ALLOW_INSECURE_SERIALIZATION=1.
-  - CUDA vLLM: weight publish uses the NATIVE `reload_weights` worker RPC
-    (no custom worker code; see load_weights). The previous custom callable
-    passed the rung-1 canary 2026-07-20; the native path needs one rerun of
-    recipes/04_smoke_vllm_cuda.py to re-validate.
+Platform notes:
+  - Weight publish uses vLLM's NATIVE `reload_weights` worker RPC (no
+    custom worker code; see load_weights).
   - EOS parity (response INCLUDES its eos token — the loss-mask convention
     the trainer assumes, rollout/types.py) must be verified on the first
     real run — vLLM configs differ on stop-token inclusion.
-    recipes/04_smoke_vllm_cuda.py is the check (PASSED A100 2026-07-20).
+    recipes/04_smoke_vllm_cuda.py is the check.
   - WSL2 (Docker Desktop GPU passthrough): no UVA, so vLLM's V2 model
     runner cannot init — __init__ detects WSL and defaults the V1 runner
     (VLLM_USE_V2_MODEL_RUNNER=0). Real Linux keeps V2.
 
-Imports are file-level: this module only imports where vLLM is installed —
-the vLLM env (box: /opt/vllm-env in the container; Mac: ~/.venv-vllm-metal)
-— exactly like minirl/megatron.py only imports where megatron does. The one
-exception is mlx inside _metal_apply_weights_from_file, which executes
-INSIDE the Metal worker process, never here.
+Imports are file-level: this module only imports where vLLM is installed
+(the box's /opt/vllm-env) — exactly like minirl/megatron.py only imports
+where megatron does.
 """
 
 import os
@@ -53,7 +45,6 @@ from transformers import AutoTokenizer
 from vllm import EngineArgs, LLMEngine
 from vllm import SamplingParams as VSP
 from vllm.inputs import TokensPrompt
-from vllm.platforms import current_platform
 
 from minirl.rollout.types import SamplingParams, Trajectory
 
@@ -64,13 +55,12 @@ class VLLMEngine:
     def __init__(
         self,
         model_name_or_path: str,
-        dtype: str = "bfloat16",
-        max_model_len: int = 4096,
-        seed: int = 0,  # DP fleets: give each engine a different seed (uncorrelated sampling)
-        gpu_id: int | None = None,  # pin to ONE GPU (DP placement)
-        gpu_memory_utilization: float = 0.9,  # fraction of the GPU vLLM may claim
-        #   (vLLM's own knob/name — lower it when the GPU is shared with a
-        #   desktop or a colocated trainer)
+        gpu_id: int | None = None,  # OURS: pin to ONE GPU (DP placement)
+        **engine_kwargs,  # everything else forwards to vLLM's EngineArgs
+        #   untouched (seed per engine for uncorrelated sampling,
+        #   gpu_memory_utilization when the GPU is shared, ...) — every vLLM
+        #   knob is reachable without this class naming it. Two defaults
+        #   applied if absent: dtype="bfloat16", max_model_len=4096.
     ):
 
         # vLLM launches EngineCore as a subprocess via FORK by default, and a
@@ -95,10 +85,11 @@ class VLLMEngine:
         old_cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
         if gpu_id is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        engine_kwargs.setdefault("dtype", "bfloat16")
+        engine_kwargs.setdefault("max_model_len", 4096)
         try:
             self.engine = LLMEngine.from_engine_args(
-                EngineArgs(model=model_name_or_path, dtype=dtype, max_model_len=max_model_len,
-                           seed=seed, gpu_memory_utilization=gpu_memory_utilization)
+                EngineArgs(model=model_name_or_path, **engine_kwargs)
             )
         finally:
             if gpu_id is not None:
@@ -114,8 +105,6 @@ class VLLMEngine:
         self._pending: dict[str, dict] = {}  # request_id -> {prompt_ids, meta, version}
         self._stash: list[list[Trajectory]] = []  # finished groups awaiting a poll (drain surplus)
         self._next_id = 0
-
-    # ---------------- tier-2 streaming interface ----------------
 
     @property
     def n_inflight(self) -> int:
@@ -215,24 +204,17 @@ class VLLMEngine:
     def load_weights(self, named_tensors, version: int) -> None:
         """Publish learner weights into the RUNNING engine. Engine must be idle.
 
-        Path-based: the state dict is written to a safetensors file and the
-        WORKER loads it — no tensor serialization over RPC.
-          - CUDA: 100% vLLM-native. The worker exposes a `reload_weights`
-            RPC (v1/worker/gpu_worker.py) whose `weights_path=` mode points
-            the worker's own model loader at our directory: it globs the
-            *.safetensors, streams them through model.load_weights, and even
-            warns if any expected weight was missing. Named-method RPC — no
-            callable serialization, no VLLM_ALLOW_INSECURE_SERIALIZATION.
-          - Metal: custom recipe stays (the plugin's MetalModelRunner has no
-            reload_weights, and its paged-attention wrapper hides attention
-            from the parameter tree).
+        Path-based and 100% vLLM-native: the state dict is written to a
+        safetensors file and the WORKER loads it — no tensor serialization
+        over RPC. The worker's `reload_weights` RPC (v1/worker/gpu_worker.py)
+        `weights_path=` mode points its own model loader at our directory:
+        it globs the *.safetensors, streams them through model.load_weights,
+        and warns if any expected weight was missing.
         """
         assert not self._pending, "load_weights during in-flight generation (drain first)"
         # Ship each STORAGE once: tied weights (Qwen: lm_head <- embed_tokens)
-        # are aliases, and safetensors refuses aliased tensors (found on the
-        # A100 box 2026-07-20; the Mac never saw it — MPS->CPU moves broke the
-        # aliasing by copying). Loaders re-tie on their side: vLLM skips
-        # lm_head for tied configs.
+        # are aliases, and safetensors refuses aliased tensors. Loaders
+        # re-tie on their side: vLLM skips lm_head for tied configs.
         tensors: dict[str, Tensor] = {}
         seen: set[int] = set()
         for k, v in named_tensors:
@@ -242,12 +224,8 @@ class VLLMEngine:
             seen.add(ptr)
             tensors[k] = v.detach().cpu().contiguous()
         with tempfile.TemporaryDirectory() as td:
-            path = os.path.join(td, "learner.safetensors")
-            save_file(tensors, path)
-            if current_platform.is_cuda():
-                self.engine.collective_rpc("reload_weights", kwargs={"weights_path": td})
-            else:
-                self.engine.collective_rpc(_metal_apply_weights_from_file, args=(path,))
+            save_file(tensors, os.path.join(td, "learner.safetensors"))
+            self.engine.collective_rpc("reload_weights", kwargs={"weights_path": td})
         self.version = version
 
     def _to_traj(self, req_out, group: dict) -> Trajectory:
@@ -272,39 +250,3 @@ class VLLMEngine:
             version=group["version"],
             meta=dict(group["meta"]),
         )
-
-
-def _metal_apply_weights_from_file(worker, path: str) -> str:
-    """Metal-ONLY worker-side weight load (runs INSIDE the engine worker via
-    callable collective_rpc; may need VLLM_ALLOW_INSECURE_SERIALIZATION=1).
-
-    Defined at module level for readability but shipped by VALUE through
-    vLLM's callable-RPC (cloudpickle), so the worker env does not need minirl
-    importable. This is the validated spike recipe.
-    CUDA never reaches here — it uses vLLM's native `reload_weights` RPC.
-    """
-    import mlx.core as mx
-
-    model = worker.model_runner.model
-    weights = mx.load(path)
-    model.load_weights(list(weights.items()), strict=False)  # tree params: embed/norms/MLP
-    # Attention lives behind SDPAPagedAttentionWrapper._inner — invisible to
-    # the parameter tree, read LIVE by the Metal kernel each forward. Assign
-    # directly, per layer. (Spike-validated; _inner is a private plugin
-    # attribute — the canary test must fail loud if the layout changes.)
-    layers = getattr(getattr(model, "model", model), "layers", [])
-    n_assigned = 0
-    for i, layer in enumerate(layers):
-        inner = getattr(getattr(layer, "self_attn", None), "_inner", None)
-        if inner is None:
-            continue
-        for name in ("q_proj", "k_proj", "v_proj", "o_proj", "q_norm", "k_norm"):
-            key = f"model.layers.{i}.self_attn.{name}.weight"
-            mod = getattr(inner, name, None)
-            if mod is not None and key in weights:
-                mod.weight = weights[key].astype(mod.weight.dtype)
-                n_assigned += 1
-    assert n_assigned > 0 or not layers, (
-        "no attention weights assigned — plugin layout changed? (spike canary)"
-    )
-    return f"metal:{n_assigned}"

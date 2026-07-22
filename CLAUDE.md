@@ -43,15 +43,12 @@ anything (`platform`/`uname`):
   `tests/fake_trainer.py` — the demoted hand-written DDP trainer, now the
   executable spec of the trainer contract (2-process gloo/CPU equivalence —
   docs/ddp.md; FSDP2 history in docs/fsdp2.md). NCCL is validated on the box.
-  vLLM RUNS LOCALLY via the vllm-metal plugin in the isolated venv
-  `~/.venv-vllm-metal` (user-approved exception to the no-venv rule; repo dev
-  stays on mingxuan) — spike findings + weight-update recipe:
-  docs/async_tier2.md §8. (Packing was prototyped and rolled back for
-  readability — docs/packing.md.)
+  vLLM is CUDA-box-ONLY (the Mac's vllm-metal path was REMOVED 2026-07-21 —
+  no more Mac engine testing; history in docs/async_tier2.md §8).
 - Smoke recipes (vLLM-only since 2026-07-20 — HFEngine/StreamAdapter and the
   MPS recipe 03 are REMOVED): `recipes/04_smoke_vllm_cuda.py` (engine
   validation) then `recipes/05_grpo_gsm8k_cuda.py` (GRPO on GSM8K), both
-  CUDA-box; on the Mac, vLLM = the vllm-metal venv.
+  CUDA-box.
 
 ## Conventions that are LAW here
 

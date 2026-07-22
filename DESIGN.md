@@ -220,7 +220,7 @@ miniRL/
 │   │                            #   n_inflight + load_weights + pad_id; low-level
 │   │                            #   LLMEngine step loop (continuous batching);
 │   │                            #   gpu_id pinning for DP placement (§11); native
-│   │                            #   reload_weights publish (Metal: custom recipe).
+│   │                            #   reload_weights publish.
 │   │                            #   File-level vllm imports — vLLM env only, like
 │   │                            #   megatron.py. Contract spec: the fake in
 │   │                            #   tests/test_fully_async.py. (hf_engine.py +
