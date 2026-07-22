@@ -66,6 +66,10 @@ def main() -> None:
                          "untrained baseline); None = no eval")
     ap.add_argument("--eval-limit", type=int, default=256,
                     help="how many test prompts each eval scores")
+    ap.add_argument("--enable-thinking", action="store_true",
+                    help="let the model generate <think> reasoning as response tokens "
+                         "(training AND eval prompts) — raise --rollout-max-response-len "
+                         "accordingly")
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--project", default="minirl")
     ap.add_argument("--name", default=None)
@@ -92,7 +96,8 @@ def main() -> None:
         rollout_max_response_len=args.rollout_max_response_len,
         dynamic_sampling=True,
     )
-    data_cfg = DataConfig(prompt_data="openai/gsm8k", input_key="question", label_key="answer")
+    data_cfg = DataConfig(prompt_data="openai/gsm8k", input_key="question", label_key="answer",
+                          enable_thinking=args.enable_thinking)
 
     # trainer FIRST: Megatron initializes model parallelism + the CUDA
     # context before any engine mutates CUDA_VISIBLE_DEVICES.
@@ -109,7 +114,9 @@ def main() -> None:
         if args.eval_interval:
             eval_ds = load_dataset("openai/gsm8k", "main", split="test")
             eval_sets = [EvalSet("gsm8k_test",
-                                 make_eval_prompts(eval_ds, tok, gsm8k_row, limit=args.eval_limit),
+                                 make_eval_prompts(eval_ds, tok, gsm8k_row,
+                                                   enable_thinking=data_cfg.enable_thinking,
+                                                   limit=args.eval_limit),
                                  reward_fn)]
             eval_cfg = EvalConfig(eval_interval=args.eval_interval,
                                   eval_max_response_len=args.rollout_max_response_len)

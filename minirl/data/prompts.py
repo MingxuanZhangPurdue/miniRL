@@ -65,13 +65,12 @@ class HFPromptSource:
         tokenizer,
         cfg: DataConfig,
         row_fn: RowFn | None = None,
-        enable_thinking: bool = False,
     ):
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.cfg = cfg
         self.row_fn = row_fn if row_fn is not None else keyed_row_fn(cfg.input_key, cfg.label_key)
-        self.enable_thinking = enable_thinking
+        self.enable_thinking = cfg.enable_thinking
         self.order = list(range(len(dataset)))  # this epoch's visit order
         self.rng = random.Random(cfg.rollout_seed)
         if cfg.rollout_shuffle:

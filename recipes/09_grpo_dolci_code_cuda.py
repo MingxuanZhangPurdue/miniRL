@@ -117,6 +117,10 @@ def main() -> None:
                          "untrained baseline); None = no eval")
     ap.add_argument("--eval-limit", type=int, default=200,
                     help="how many MBPP test prompts each eval scores")
+    ap.add_argument("--enable-thinking", action="store_true",
+                    help="let the model generate <think> reasoning as response tokens "
+                         "(training AND eval prompts) — raise --rollout-max-response-len "
+                         "accordingly")
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--project", default="minirl")
     ap.add_argument("--name", default=None)
@@ -144,7 +148,8 @@ def main() -> None:
         dynamic_sampling=True,  # all-pass/all-fail groups carry no gradient — replace them
     )
     data_cfg = DataConfig(prompt_data="allenai/Dolci-RL-Zero-Code-7B",
-                          input_key="prompt", label_key="ground_truth")
+                          input_key="prompt", label_key="ground_truth",
+                          enable_thinking=args.enable_thinking)
 
     # trainer FIRST: Megatron initializes model parallelism + the CUDA
     # context before any engine mutates CUDA_VISIBLE_DEVICES.
@@ -162,7 +167,9 @@ def main() -> None:
         if args.eval_interval:
             mbpp = load_dataset("google-research-datasets/mbpp", "full", split="test")
             eval_sets = [EvalSet("mbpp_test",
-                                 make_eval_prompts(mbpp, tok, mbpp_row, limit=args.eval_limit),
+                                 make_eval_prompts(mbpp, tok, mbpp_row,
+                                                   enable_thinking=data_cfg.enable_thinking,
+                                                   limit=args.eval_limit),
                                  reward_fn)]
             eval_cfg = EvalConfig(eval_interval=args.eval_interval, eval_max_response_len=512)
         if args.wandb:

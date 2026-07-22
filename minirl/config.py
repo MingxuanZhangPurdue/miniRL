@@ -105,5 +105,10 @@ class DataConfig:
     input_key: str = "input"  # row key -> the user message
     label_key: str | None = None  # row key -> meta["label"] (the reward's gold answer)
     apply_chat_template: bool = True
+    enable_thinking: bool = False  # False pre-fills an empty <think></think> in the
+    #   generation prompt (short-answer regime); True lets the model generate its
+    #   reasoning as RESPONSE tokens — trained on, decoded by the reward, and
+    #   counted against rollout_max_response_len (raise it accordingly). One
+    #   knob for training AND eval prompts, so they can never disagree.
     rollout_shuffle: bool = True  # shuffle prompts each epoch (seeded)
     rollout_seed: int = 0
