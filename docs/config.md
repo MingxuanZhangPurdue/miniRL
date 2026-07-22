@@ -49,8 +49,13 @@ one helper bridges them.
     input_key            --input-key             "input"
     label_key            --label-key             None
     apply_chat_template  --apply-chat-template   True
+    enable_thinking      --apply-chat-template-kwargs '{"enable_thinking": ...}'   False
     rollout_shuffle      --rollout-shuffle       True
     rollout_seed         --rollout-seed          0
+
+enable_thinking lives HERE (not per-call-site) so training and eval prompts
+can never disagree on the template regime — the recipes thread
+data_cfg.enable_thinking into make_eval_prompts too.
 
 `input_key`/`label_key` drive a GENERIC row adapter: row -> a single user
 message from `row[input_key]`, and `row[label_key]` into a FIXED meta key

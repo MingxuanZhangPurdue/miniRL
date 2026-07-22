@@ -142,6 +142,17 @@ def test_prompt_source_deterministic(tok):
     assert a == b
 
 
+def test_enable_thinking_flows_from_data_config(tok):
+    ds = FakeDataset([{"question": "q", "answer": "1"}])
+    off = HFPromptSource(ds, tok, GSM8K_CFG)(1)[0][0]
+    on_cfg = DataConfig(prompt_data="fake", input_key="question", label_key="answer",
+                        enable_thinking=True)
+    on = HFPromptSource(ds, tok, on_cfg)(1)[0][0]
+    # thinking OFF pre-fills an empty think block in the generation prompt;
+    # ON leaves the model to generate its own reasoning
+    assert "<think>" in tok.decode(off) and "<think>" not in tok.decode(on)
+
+
 def test_prompt_source_no_shuffle_is_dataset_order(tok):
     ds = FakeDataset([{"question": f"q{i}", "answer": str(i)} for i in range(4)])
     cfg = DataConfig(prompt_data="fake", input_key="question", label_key="answer",
