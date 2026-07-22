@@ -58,7 +58,7 @@ from megatron.core.utils import get_model_config
 from torch import Tensor
 
 from minirl.algos.aggregate import aggregate_loss, minibatch_denom
-from minirl.packing import Pack, pack_rows, plan_packs, unpack_ce
+from minirl.rollout.packing import Pack, pack_rows, plan_packs, unpack_ce
 from minirl.rollout.batching import iter_microbatches, iter_minibatches, slice_batch
 from minirl.rollout.types import Batch
 

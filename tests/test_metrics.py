@@ -1,7 +1,7 @@
 """metrics_logger tests — a FakeRun (duck-typed .log) stands in for wandb,
 so the suite never needs the wandb package or a network."""
 
-from minirl.logging import metrics_logger, namespace_metrics
+from minirl.metrics import metrics_logger, namespace_metrics
 
 
 class FakeRun:

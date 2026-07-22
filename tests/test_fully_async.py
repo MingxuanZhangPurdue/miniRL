@@ -20,7 +20,7 @@ from torch import nn
 
 from minirl.algos import GRPOConfig, grpo_loss
 from minirl.config import PlacementConfig, RolloutConfig
-from minirl.controllers import collect_groups_dp, fit_async
+from minirl.fully_async import collect_groups_dp, fit_async
 from minirl.rollout.types import SamplingParams, Trajectory
 from tests.fake_trainer import TrainConfig, Trainer
 

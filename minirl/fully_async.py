@@ -9,6 +9,10 @@ One controller serves every async configuration on a single node:
     world>1 (torchrun; DDP auto-engages)   rank 0 collects + broadcasts;
                                            followers train + join publishes
 
+The repo keeps exactly TWO controllers by design: this one, and a planned
+sync.py sibling (collect -> train -> publish, no overlap — the
+five-minute-readable teaching reference; same collector, no pipeline slot).
+
 COLLECTION — deal, don't partition. No engine is "assigned batch/k prompts".
 A shared dealer (the caller's stateful prompt_source, called only under the
 tally's lock — its cursor already hands out each prompt exactly once, so

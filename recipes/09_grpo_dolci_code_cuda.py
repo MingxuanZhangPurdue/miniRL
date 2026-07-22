@@ -42,11 +42,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from minirl.algos import GRPOConfig, grpo_loss
 from minirl.config import DataConfig, EvalConfig, PlacementConfig, RolloutConfig
-from minirl.controllers import fit_async
+from minirl.fully_async import fit_async
 from minirl.data import HFPromptSource
 from minirl.eval import EvalSet, make_eval_prompts
 from minirl.vllm_engine import VLLMEngine
-from minirl.logging import metrics_logger
+from minirl.metrics import metrics_logger
 from minirl.megatron import MegatronTrainConfig, MegatronTrainer, setup_distributed
 from minirl.rewards import make_code_reward_fn
 

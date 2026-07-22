@@ -30,7 +30,7 @@ grpo/gspo/cispo/sft as
 files + dapo/dr_grpo as named configs (`LOSSES` registry, algos/README.md),
 group advantages with pluggable `advantage_fn`, TIS, the three-mode reduce
 (`loss_agg`), `make_batch`, **trainer-internal sequence packing**
-(2026-07-20, minirl/packing.py + pack_max_tokens — packing.md §1a; packed
+(2026-07-20, minirl/rollout/packing.py + pack_max_tokens — packing.md §1a; packed
 equivalence measured on-box, marginally closer to fp32 truth than padded),
 **the Megatron trainer** (`minirl/megatron.py`,
 built 2026-07-20 per docs/megatron.md — Megatron-Core owns fwd/bwd,
@@ -44,14 +44,14 @@ The hand-written trainer it replaced — DDP merged
 2026-07-16, ddp.md §7; FSDP2 before that, fsdp2.md — is DEMOTED to
 `tests/fake_trainer.py`: the executable spec of the trainer contract that
 the local suite drives on CPU), **wandb
-metric logging** (`minirl/logging.py`; wandb lives ONLY in recipes; recipe 05
+metric logging** (`minirl/metrics.py`; wandb lives ONLY in recipes; recipe 05
 wires it behind `--wandb`), rewards (GSM8K math verifier + level-2 code
 sandbox), the data layer (chat templating with assistant-mask, HF prompt
 sources, SFT batching), the GSM8K GRPO recipe
 (`recipes/05_grpo_gsm8k_cuda.py`; the MPS recipe 03 was REMOVED 2026-07-20
 with HFEngine — vLLM-only), and **THE
 fully-async controller** (2026-07-14 consolidation, docs/async_tier2.md
-§10-§11: `controllers/fully_async.py` — fit_async + collect_groups_dp; k DP
+§10-§11: `fully_async.py` — fit_async + collect_groups_dp; k DP
 engines via shared dealer/tally with burst-capped deals, one owner thread
 per engine, drain-ALL-then-publish, staleness ≤ publish_interval + 1; 1..m
 trainer ranks — rank 0 collects + broadcasts + publishes from its own
@@ -69,7 +69,7 @@ n>1 fan-out is ours now).
 **Decided and documented, not yet built:** **Megatron P3 (DP>1 + publish
 gather + recipe-05 wandb parity — needs a multi-GPU pod; the P1 box has one
 GPU)**, the sync controller
-(`controllers/sync.py` — collect -> train -> publish via collect_groups_dp,
+(`sync.py` — collect -> train -> publish via collect_groups_dp,
 no overlap), in-flight weight updates (DEFERRED by decision 2026-07-10 —
 docs/async_tier2.md §4), NCCL weight sync (need the CUDA box;
 docs/precision.md, DESIGN §6), agentic runners (docs/agentic_rl.md), RLOO,
@@ -189,23 +189,22 @@ miniRL/
 │   │                            #   RolloutConfig (generation+collection), DataConfig
 │   │                            #   (prompt dataset), PlacementConfig (GPU split)
 │   │                            #   (single-node GPU split, slime's layout — §11)
-│   ├── logging.py               # [done] metrics_logger: the on_metrics callback —
+│   ├── metrics.py               # [done] metrics_logger: the on_metrics callback —
 │   │                            #   namespacing + derived metrics + iteration-as-step;
 │   │                            #   wandb injected by RECIPES, never imported by core
+│   │                            #   (renamed from logging.py 2026-07-22 — stdlib shadow)
 │   │
-│   ├── controllers/             # training drivers — exactly TWO by decision (§11)
-│   │   ├── fully_async.py       # [done] THE async loop: fit_async + collect_groups_dp —
-│   │   │                        #   k DP engines (shared dealer + tally, burst-capped
-│   │   │                        #   deals, one owner thread per engine), 1..m trainer
-│   │   │                        #   ranks (rank 0 collects + broadcasts + publishes
-│   │   │                        #   locally; followers only train — DDP replication),
-│   │   │                        #   drain-ALL-then-publish (docs/async_tier2.md
-│   │   │                        #   §10-§11, docs/ddp.md). round_based.py /
-│   │   │                        #   streaming.py / data_parallel.py retired 2026-07-14 —
-│   │   │                        #   both tiers were k=1 special cases of this file
-│   │   └── sync.py              # (planned) collect -> train -> publish, no overlap;
-│   │                            #   same collector, no pipeline slot — the debugging
-│   │                            #   and teaching reference
+│   ├── fully_async.py           # [done] THE controller (flattened out of controllers/
+│   │                            #   2026-07-22): fit_async + collect_groups_dp —
+│   │                            #   k DP engines (shared dealer + tally, burst-capped
+│   │                            #   deals, one owner thread per engine), 1..m trainer
+│   │                            #   ranks (rank 0 collects + broadcasts + publishes
+│   │                            #   locally; followers only train — DDP replication),
+│   │                            #   drain-ALL-then-publish (docs/async_tier2.md
+│   │                            #   §10-§11, docs/ddp.md). Exactly TWO controllers by
+│   │                            #   decision: this one + the planned root-level
+│   │                            #   sync.py sibling (collect -> train -> publish,
+│   │                            #   no overlap — the teaching reference)
 │   │
 │   ├── models/
 │   │   ├── hf.py                # load_policy()/load_ref(): AutoModelForCausalLM +
@@ -267,10 +266,6 @@ miniRL/
 │   │   │                        #   scalar AdvantageFn tier — batching.py)
 │   │   └── distill.py           # on-policy distillation: reverse-KL to teacher (MOPD-lite)
 │   │
-│   ├── packing.py               # [built 2026-07-20] sequence packing, trainer-internal:
-│   │                            #   plan/pack/unpack (pure tensor, CPU-tested); the
-│   │                            #   Megatron trainer packs the forward, unpacks the CE
-│   │                            #   before the loss — algos/ never sees it (packing.md §1a)
 │   ├── megatron.py              # [built 2026-07-20, P1-validated single-GPU] THE trainer:
 │   │                            #   Megatron-Core end to end (docs/megatron.md).
 │   │                            #   Bridge-built model from the HF name, fused-CE
@@ -285,11 +280,15 @@ miniRL/
 │   ├── rollout/                 # ≈ slime's data buffer + orchestration layer
 │   │   ├── types.py             # [done] SamplingParams, Trajectory, Batch (the data contract)
 │   │   ├── batching.py          # [done] make_batch (pad + advantages), mini/microbatch slicing
-│   │   │                        #   (packing lives in minirl/packing.py, NOT here — the
-│   │   │                        #   collation contract stays padded (B, T) forever)
+│   │   │                        #   (the collation contract stays padded (B, T) forever)
+│   │   ├── packing.py           # [built 2026-07-20] the SECOND microbatch slicing —
+│   │   │                        #   dense pad-free packs, trainer-internal: plan/pack/
+│   │   │                        #   unpack (pure tensor, CPU-tested); the Megatron
+│   │   │                        #   trainer packs the forward, unpacks the CE before
+│   │   │                        #   the loss — algos/ never sees it (packing.md §1a)
 │   │   ├── filtering.py         # [done] group filters (reward_nonzero_std = DAPO dynamic
 │   │   │                        #   sampling) + RewardFn/GroupFilter types. Collection
-│   │   │                        #   itself lives in controllers/fully_async.py —
+│   │   │                        #   itself lives in fully_async.py —
 │   │   │                        #   sampling.py and streaming.py retired 2026-07-14 (§11)
 │   │   ├── buffer.py            # (dropped: tier 2 shipped WITHOUT queues — the engine
 │   │   │                        #   stash + held-future join replaced them)
@@ -483,7 +482,7 @@ loop:
 Simple, on-policy, but the GPU alternates between generation and training —
 exactly the inefficiency GLM-5's async infra removes.
 
-### Asynchronous (`controllers/fully_async.py`)
+### Asynchronous (`fully_async.py`)
 
 Built in two tiers, mirroring slime (full study + design: docs/async_training.md):
 
@@ -549,7 +548,7 @@ readable in five minutes.
 
 Design, knobs, and measured equivalence: **docs/packing.md §1a**. The 2026
 implementation packs whole rows inside the Megatron trainer
-(`minirl/packing.py`, `MegatronTrainConfig.pack_max_tokens`, default OFF)
+(`minirl/rollout/packing.py`, `MegatronTrainConfig.pack_max_tokens`, default OFF)
 and unpacks the fused-CE map back to `(B, T)` before any loss code runs —
 so unlike the first prototype (rolled back 2026-07-09 for threading a
 second layout through Batch/trainer/aggregate/gspo), the packed format
@@ -646,7 +645,7 @@ real frameworks. This table is the contract; keep it updated as code lands.
 | Actor / rollout placement | `rollout/placement.py`: **colocated vs disaggregated** GPU assignment on one node | **colocated vs disaggregated** modes on GPU groups | **hybrid engine**: actor & rollout share GPUs, offload/reload between phases |
 | Weight sync learner → sampler | `rollout/weight_sync.py`: versioned NCCL broadcast (shm fallback on CPU) | bucketed NCCL broadcast (disaggregated) or CUDA IPC (colocated) | `sync_model_weights` / resharding between FSDP and vLLM formats |
 | Data buffer | `rollout/buffer.py` (bounded queue + staleness filter) | Data Buffer module (also the custom-data/partial-rollout hook point) | replay/experience handling inside the trainer loop |
-| Async / off-policy RL | `controllers/fully_async.py`, `version` tag + TIS correction | asynchronous training mode; partial rollouts | one-step-off async mode; agent-loop workers |
+| Async / off-policy RL | `fully_async.py`, `version` tag + TIS correction | asynchronous training mode; partial rollouts | one-step-off async mode; agent-loop workers |
 | Reward plumbing | `rewards/` fns taking `Trajectory` → float | custom reward via `--custom-rm-path` | `RewardManager` (rule-based fns or RM worker) |
 | Advantage estimators | `algos/advantage.py` (GAE, group-norm, RLOO) | selected per algorithm in training scripts | `core_algos.py` advantage estimator registry (`grpo`, `gae`, `rloo`, ...) |
 | Algorithm zoo | `algos/*.py` one file per loss | PPO/GRPO variants via CLI flags | `ppo`, `grpo`, `dapo`, `rloo`, ... trainer configs |

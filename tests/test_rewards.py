@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from minirl.config import RolloutConfig
-from minirl.controllers import collect_groups_dp
+from minirl.fully_async import collect_groups_dp
 from minirl.rewards import (
     code_reward, extract_code, extract_final_answer, grade_answer,
     make_code_reward_fn, math_reward, run_python,

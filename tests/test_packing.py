@@ -7,7 +7,7 @@ planning, the packed layout, and the CE-scatter back to (B, T).
 
 import torch
 
-from minirl.packing import pack_rows, plan_packs, unpack_ce
+from minirl.rollout.packing import pack_rows, plan_packs, unpack_ce
 
 
 def padded(rows: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
