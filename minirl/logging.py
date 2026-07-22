@@ -40,7 +40,7 @@ _NAMESPACE = {
         "loss", "grad_norm", "lr", "approx_kl", "clip_frac", "ratio_max",
         "kl_ref", "tis_mean", "tis_clip_frac", "nll", "ppl",
     ),
-    "time": ("t_generate", "t_train", "t_iter"),
+    "time": ("t_generate", "t_train", "t_iter", "t_eval"),
     "async": ("staleness",),
 }
 _KEY_TO_GROUP = {key: group for group, keys in _NAMESPACE.items() for key in keys}
@@ -85,6 +85,9 @@ def metrics_logger(run=None, echo: bool = True) -> Callable[[dict], None]:
             ):
                 if key in m:
                     parts.append(f"{label}={m[key]:{fmt}}")
+            for key in m:  # eval scores (already namespaced eval/{set}/...)
+                if key.startswith("eval/") and key.endswith("/reward_mean"):
+                    parts.append(f"{key.split('/')[1]}={m[key]:.3f}")
             print("  ".join(parts), flush=True)
         if run is not None:
             run.log(namespace_metrics(m), step=m.get("iteration"))

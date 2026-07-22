@@ -86,6 +86,25 @@ Mitigation — the recipe logs `reward_fn.__qualname__` into the run config, so
 every run still records its reward by name; the recipe itself (git-tracked)
 is the experiment definition.
 
+## EvalConfig — periodic benchmark eval (minirl/eval.py)
+
+    field                     slime flag                    default
+    eval_interval             --eval-interval               None (never)
+    eval_before_train         (inverse of --skip-eval-before-train)  True
+    n_samples_per_eval_prompt --n-samples-per-eval-prompt   1
+    eval_temperature          --eval-temperature            0.0 (greedy)
+    eval_top_p / eval_top_k   --eval-top-p / --eval-top-k   1.0 / -1
+    eval_max_response_len     --eval-max-response-len       1024
+
+Same split as everywhere: the NUMERIC knobs are config; WHICH benchmarks
+(datasets + rewards) are code — a list of `EvalSet(name, prompts,
+reward_fn)` handed to fit_async, the analog of slime's `--eval-config`
+YAML `datasets:` section. Eval generates through the SAME rollout engines
+in the post-publish quiescent window (all engines idle at exactly the
+published version — hence eval_interval must be a multiple of
+publish_interval), plus an untrained baseline before iteration 1. Metrics:
+eval/{name}/reward_mean, response_len_mean, truncated_ratio, t_eval.
+
 ## Name-alignment left for a follow-up (train/loss configs)
 
 Cheap slime renames NOT done here, to keep this change scoped to rollout:

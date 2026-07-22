@@ -34,9 +34,10 @@ from transformers import AutoTokenizer
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from minirl.algos import GRPOConfig, grpo_loss
-from minirl.config import DataConfig, PlacementConfig, RolloutConfig
+from minirl.config import DataConfig, EvalConfig, PlacementConfig, RolloutConfig
 from minirl.controllers import fit_async
 from minirl.data import HFPromptSource, gsm8k_row
+from minirl.eval import EvalSet, make_eval_prompts
 from minirl.vllm_engine import VLLMEngine
 from minirl.logging import metrics_logger
 from minirl.megatron import MegatronTrainConfig, MegatronTrainer, setup_distributed
@@ -60,6 +61,11 @@ def main() -> None:
                     help="pack each microbatch into dense pad-free rows under this token "
                          "budget (replaces --micro-batch-size as the grad-accum unit; "
                          "needs bf16). None = padded microbatches")
+    ap.add_argument("--eval-interval", type=int, default=None,
+                    help="score the gsm8k test split every N iterations (plus an "
+                         "untrained baseline); None = no eval")
+    ap.add_argument("--eval-limit", type=int, default=256,
+                    help="how many test prompts each eval scores")
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--project", default="minirl")
     ap.add_argument("--name", default=None)
@@ -93,12 +99,20 @@ def main() -> None:
     trainer = MegatronTrainer(MODEL, grpo_loss, loss_cfg, train_cfg)
 
     engines, prompt_source, reward_fn, run = [], None, None, None
+    eval_sets, eval_cfg = [], None
     if rank == 0:
         engines = [VLLMEngine(MODEL, gpu_id=g, seed=g) for g in placement.rollout_gpu_ids]
         tok = AutoTokenizer.from_pretrained(MODEL)
         ds = load_dataset("openai/gsm8k", "main", split="train")
         prompt_source = HFPromptSource(ds, tok, data_cfg, row_fn=gsm8k_row)
         reward_fn = make_math_reward_fn(tok)
+        if args.eval_interval:
+            eval_ds = load_dataset("openai/gsm8k", "main", split="test")
+            eval_sets = [EvalSet("gsm8k_test",
+                                 make_eval_prompts(eval_ds, tok, gsm8k_row, limit=args.eval_limit),
+                                 reward_fn)]
+            eval_cfg = EvalConfig(eval_interval=args.eval_interval,
+                                  eval_max_response_len=args.rollout_max_response_len)
         if args.wandb:
             import wandb  # recipes only, never core
 
@@ -108,6 +122,7 @@ def main() -> None:
                         "num_rollout": args.num_rollout, "loss": asdict(loss_cfg),
                         "train": asdict(train_cfg), "rollout": asdict(rollout_cfg),
                         "data": asdict(data_cfg),
+                        "eval": asdict(eval_cfg) if eval_cfg else None,
                         "reward_fn": reward_fn.__qualname__},  # reward is code, not config — record its name
             )
         print(f"rank 0: {len(engines)} engine(s) on GPUs {placement.rollout_gpu_ids}, "
@@ -123,6 +138,8 @@ def main() -> None:
             num_iterations=args.num_rollout,
             publish_interval=1,
             on_metrics=metrics_logger(run),  # rank 0 only ever emits
+            eval_sets=eval_sets,
+            eval_cfg=eval_cfg,
         )
     finally:
         if run is not None:

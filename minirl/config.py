@@ -68,6 +68,35 @@ class RolloutConfig:
 
 
 @dataclass(frozen=True)
+class EvalConfig:
+    """Periodic benchmark eval through the rollout engines (minirl/eval.py).
+
+    Runs in the post-publish quiescent window, so every eval sees exactly
+    the just-published weights; eval_interval must therefore be a multiple
+    of publish_interval. WHICH datasets/rewards to evaluate is code, not
+    config: fit_async takes a list of EvalSet objects alongside this.
+    """
+
+    eval_interval: int | None = None  # every N training iterations; None = never
+    eval_before_train: bool = True  # iteration-0 baseline (the untrained model's score)
+    n_samples_per_eval_prompt: int = 1
+    eval_temperature: float = 0.0  # greedy default: deterministic, cheap; benchmark-style
+    #   sampled eval (mean@k) = temperature>0 + n_samples_per_eval_prompt>1
+    eval_top_p: float = 1.0
+    eval_top_k: int = -1
+    eval_max_response_len: int = 1024
+
+    def sampling_params(self) -> SamplingParams:
+        return SamplingParams(
+            temperature=self.eval_temperature,
+            top_p=self.eval_top_p,
+            top_k=self.eval_top_k,
+            max_new_tokens=self.eval_max_response_len,
+            n=self.n_samples_per_eval_prompt,
+        )
+
+
+@dataclass(frozen=True)
 class DataConfig:
     """Where prompts come from (slime's Data&Dataset group). input_key/label_key
     drive a generic row adapter; a custom row_fn is the escape hatch."""

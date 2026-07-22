@@ -42,6 +42,25 @@ def test_logger_routes_to_run_with_iteration_as_step(capsys):
     assert "iter 7" in line and "reward=0.500" in line and "stale=1" in line
 
 
+def test_eval_metrics_reach_wandb_and_echo(capsys):
+    run = FakeRun()
+    metrics_logger(run)({"iteration": 4, "loss": -0.01,
+                         "eval/mbpp_test/reward_mean": 0.25,
+                         "eval/mbpp_test/truncated_ratio": 0.0, "t_eval": 3.1})
+    (payload, step), = run.calls
+    assert step == 4
+    assert payload["eval/mbpp_test/reward_mean"] == 0.25  # pre-namespaced, passes through
+    assert payload["time/t_eval"] == 3.1  # grouped with the other timings
+    assert "mbpp_test=0.250" in capsys.readouterr().out  # echo shows eval scores
+
+
+def test_baseline_eval_only_dict_logs_at_step_zero():
+    run = FakeRun()
+    metrics_logger(run, echo=False)({"iteration": 0, "eval/bench/reward_mean": 0.1, "t_eval": 1.0})
+    (payload, step), = run.calls
+    assert step == 0 and payload["eval/bench/reward_mean"] == 0.1
+
+
 def test_logger_without_run_is_console_only(capsys):
     metrics_logger(None)(CONTROLLER_DICT)  # must not raise
     assert "reward=0.500" in capsys.readouterr().out

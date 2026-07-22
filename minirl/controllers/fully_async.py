@@ -70,7 +70,8 @@ import torch.distributed as dist
 from torch import Tensor
 
 from minirl.algos.advantage import grpo_advantages
-from minirl.config import RolloutConfig
+from minirl.config import EvalConfig, RolloutConfig
+from minirl.eval import run_eval
 from minirl.rollout.batching import make_batch
 from minirl.rollout.filtering import GroupFilter, RewardFn, reward_nonzero_std
 from minirl.rollout.types import SamplingParams, Trajectory
@@ -264,10 +265,20 @@ def fit_async(
     num_iterations: int,
     publish_interval: int = 1,  # staleness bound is interval + 1
     on_metrics: Callable[[dict], None] | None = None,
+    eval_sets: list = (),  # minirl/eval.EvalSet — benchmarks scored through the engines
+    eval_cfg: EvalConfig | None = None,
 ) -> list[dict]:
     """Run fully-async RL. Returns the per-iteration metrics history
     (rank 0; followers return []). See the module banner for the picture."""
     rank, world = _dist_ctx()
+    do_eval = eval_cfg is not None and eval_cfg.eval_interval is not None and eval_sets
+    if do_eval:
+        # eval runs in the post-publish window so it always sees the weights
+        # it claims to score — the cadences must line up
+        assert eval_cfg.eval_interval % publish_interval == 0, (
+            f"eval_interval {eval_cfg.eval_interval} must be a multiple of "
+            f"publish_interval {publish_interval}"
+        )
     # Footgun guard: a trainer built BEFORE init_process_group thinks world=1
     # and would silently skip slicing/DDP — every rank would train the full
     # batch identically (correct params, m x wasted compute, no loud failure).
@@ -324,6 +335,11 @@ def fit_async(
     # which is what makes staleness a property of the loop's SHAPE, not a config knob
     try:
         publish(version=0)  # engines start from the learner's exact weights
+        if do_eval and eval_cfg.eval_before_train:  # the untrained baseline
+            baseline = {"iteration": 0} | run_eval(engines, eval_sets, eval_cfg)
+            if on_metrics is not None:
+                on_metrics(baseline)
+            history.append(baseline)
         future = pool.submit(rollout)  # prime the pipeline: batch 1 under v0
         for it in range(1, num_iterations + 1):
             t_iter0 = time.perf_counter()
@@ -347,9 +363,14 @@ def fit_async(
             train_metrics = trainer.fit_batch(batch)  # recomputes old_logprobs
             t_train = time.perf_counter() - t0
 
+            eval_metrics: dict = {}
             if it % publish_interval == 0:
                 held = future.result()  # THE LOAD-BEARING JOIN: no publish while collecting
                 publish(version=it)
+                if do_eval and it % eval_cfg.eval_interval == 0:
+                    # engines are drained and hold version `it` — the one
+                    # window where eval provably scores the current policy
+                    eval_metrics = run_eval(engines, eval_sets, eval_cfg)
                 # Re-wrap the already-collected batch so the loop invariant
                 # "future always holds the next batch" stays true. Held data
                 # was generated under the OLD version — the structural "one
@@ -359,7 +380,7 @@ def fit_async(
             metrics = (
                 {"iteration": it, "staleness": staleness, "t_train": t_train,
                  "t_iter": time.perf_counter() - t_iter0}
-                | gen_stats | batch_stats | train_metrics
+                | gen_stats | batch_stats | train_metrics | eval_metrics
             )
             if on_metrics is not None:
                 on_metrics(metrics)

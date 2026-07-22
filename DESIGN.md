@@ -214,6 +214,11 @@ miniRL/
 │   │   └── value_head.py        # scalar head wrapping the HF model (reward model only —
 │   │                            #   no critic: PPO is out of scope, see non-goals)
 │   │
+│   ├── eval.py                  # [built 2026-07-22] benchmark eval through the rollout
+│   │                            #   engines: EvalSet (fixed prompts + reward_fn) scored
+│   │                            #   in the post-publish quiescent window every
+│   │                            #   eval_interval; leftovers stash-rescued; metrics
+│   │                            #   eval/{set}/reward_mean|response_len|truncated_ratio
 │   ├── vllm_engine.py           # [done] THE engine (vLLM-only; flattened out of the
 │   │                            #   engine/ folder 2026-07-21). Duck-typed on the
 │   │                            #   STREAMING contract: submit/poll/stash/drain/

@@ -41,9 +41,10 @@ from transformers import AutoTokenizer
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from minirl.algos import GRPOConfig, grpo_loss
-from minirl.config import DataConfig, PlacementConfig, RolloutConfig
+from minirl.config import DataConfig, EvalConfig, PlacementConfig, RolloutConfig
 from minirl.controllers import fit_async
 from minirl.data import HFPromptSource
+from minirl.eval import EvalSet, make_eval_prompts
 from minirl.vllm_engine import VLLMEngine
 from minirl.logging import metrics_logger
 from minirl.megatron import MegatronTrainConfig, MegatronTrainer, setup_distributed
@@ -65,6 +66,21 @@ def is_assert_style(row: dict) -> bool:
     except ValueError:
         return False
     return bool(tests) and all(isinstance(t, str) for t in tests)
+
+
+def mbpp_row(row: dict) -> tuple[list[dict], dict]:
+    """google-research-datasets/mbpp ("full" config): `text` + `test_list`.
+
+    The tests are SHOWN in the prompt — MBPP's standard protocol, and a
+    necessity: without them the model cannot know the required function
+    name, so every reward would be 0 by construction. The same asserts are
+    the label (test_setup_code prepended when a task has one)."""
+    tests = "\n".join(row["test_list"])
+    content = (f"{row['text'].strip()}\n\nYour code should pass these tests:\n{tests}\n\n"
+               "Write your solution in a ```python code block.")
+    setup = (row.get("test_setup_code") or "").strip()
+    label = ([setup] if setup else []) + list(row["test_list"])
+    return [{"role": "user", "content": content}], {"label": label}
 
 
 def dolci_code_row(row: dict) -> tuple[list[dict], dict]:
@@ -96,6 +112,11 @@ def main() -> None:
                     help="pack each microbatch into dense pad-free rows under this token "
                          "budget (replaces --micro-batch-size as the grad-accum unit; "
                          "needs bf16). None = padded microbatches")
+    ap.add_argument("--eval-interval", type=int, default=None,
+                    help="score the MBPP test split every N iterations (plus an "
+                         "untrained baseline); None = no eval")
+    ap.add_argument("--eval-limit", type=int, default=200,
+                    help="how many MBPP test prompts each eval scores")
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--project", default="minirl")
     ap.add_argument("--name", default=None)
@@ -130,6 +151,7 @@ def main() -> None:
     trainer = MegatronTrainer(MODEL, grpo_loss, loss_cfg, train_cfg)
 
     engines, prompt_source, reward_fn, run = [], None, None, None
+    eval_sets, eval_cfg = [], None
     if rank == 0:
         engines = [VLLMEngine(MODEL, gpu_id=g, seed=g) for g in placement.rollout_gpu_ids]
         tok = AutoTokenizer.from_pretrained(MODEL)
@@ -137,6 +159,12 @@ def main() -> None:
         print(f"dataset: {len(ds)} assert-style rows (stdin/stdout rows filtered out)")
         prompt_source = HFPromptSource(ds, tok, data_cfg, row_fn=dolci_code_row)
         reward_fn = make_code_reward_fn(tok)
+        if args.eval_interval:
+            mbpp = load_dataset("google-research-datasets/mbpp", "full", split="test")
+            eval_sets = [EvalSet("mbpp_test",
+                                 make_eval_prompts(mbpp, tok, mbpp_row, limit=args.eval_limit),
+                                 reward_fn)]
+            eval_cfg = EvalConfig(eval_interval=args.eval_interval, eval_max_response_len=512)
         if args.wandb:
             import wandb  # recipes only, never core
 
@@ -146,6 +174,7 @@ def main() -> None:
                         "num_rollout": args.num_rollout, "loss": asdict(loss_cfg),
                         "train": asdict(train_cfg), "rollout": asdict(rollout_cfg),
                         "data": asdict(data_cfg),
+                        "eval": asdict(eval_cfg) if eval_cfg else None,
                         "reward_fn": reward_fn.__qualname__},  # reward is code, not config — record its name
             )
         print(f"rank 0: {len(engines)} engine(s) on GPUs {placement.rollout_gpu_ids}, "
@@ -161,6 +190,8 @@ def main() -> None:
             num_iterations=args.num_rollout,
             publish_interval=1,
             on_metrics=metrics_logger(run),  # rank 0 only ever emits
+            eval_sets=eval_sets,
+            eval_cfg=eval_cfg,
         )
     finally:
         if run is not None:
