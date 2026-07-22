@@ -10,23 +10,24 @@ test pins the rank-0/follower wiring against a single-process reference.
 
 import os
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
-import pytest
 import torch
 import torch.distributed as tdist
 import torch.multiprocessing as mp
 from torch import nn
 
 from minirl.algos import GRPOConfig, grpo_loss
-from minirl.config import CollectConfig, PlacementConfig
+from minirl.config import PlacementConfig, RolloutConfig
 from minirl.controllers import collect_groups_dp, fit_async
 from minirl.rollout.types import SamplingParams, Trajectory
 from tests.fake_trainer import TrainConfig, Trainer
 
 VOCAB = 61
-SAMPLING = SamplingParams(max_new_tokens=5, n=2)
-FILTER_CFG = CollectConfig(group_size=2, target_groups=3, strategy="filter")
+FILTER_CFG = RolloutConfig(rollout_batch_size=3, n_samples_per_prompt=2,
+                           rollout_max_response_len=5, dynamic_sampling=True)
+SAMPLING = FILTER_CFG.sampling_params()  # the wire-type, for direct engine.submit calls
 
 
 class TinyLM(nn.Module):
@@ -171,7 +172,7 @@ def test_fills_target_with_replacements():
     (engine,) = fresh([FakeStreamEngine()])
     # 2 degenerate prompts in the first wave -> 2 replacements must be drawn
     source = pid_source(6, deg_every=2)  # pids 0,2,4 degenerate
-    trajs, stats = collect_groups_dp([engine], parity_reward, source, FILTER_CFG, SAMPLING)
+    trajs, stats = collect_groups_dp([engine], parity_reward, source, FILTER_CFG)
     assert stats["groups"] == 3 and stats["groups_dropped"] >= 2
     assert len(trajs) == 6  # 3 groups x G=2
     assert sorted({t.meta["group_id"] for t in trajs}) == [0, 1, 2]
@@ -182,17 +183,17 @@ def test_fills_target_with_replacements():
 
 def test_budget_caps_pathological_source():
     (engine,) = fresh([FakeStreamEngine()])
-    cfg = CollectConfig(group_size=2, target_groups=2, strategy="filter", max_rounds=2)
+    cfg = replace(FILTER_CFG, rollout_batch_size=2, over_sampling_rounds=2)
     source = pid_source(50, deg_every=1)  # everything degenerate: nothing survives
-    trajs, stats = collect_groups_dp([engine], parity_reward, source, cfg, SAMPLING)
+    trajs, stats = collect_groups_dp([engine], parity_reward, source, cfg)
     assert trajs == [] and stats["groups"] == 0
-    assert stats["groups_generated"] == cfg.max_rounds * cfg.target_groups  # the budget, exactly
+    assert stats["groups_generated"] == cfg.over_sampling_rounds * cfg.rollout_batch_size  # the budget, exactly
 
 
 def test_returns_short_when_source_exhausts():
     engines = fresh([FakeStreamEngine(), FakeStreamEngine()])
-    cfg = CollectConfig(group_size=2, target_groups=4, strategy="filter")
-    trajs, stats = collect_groups_dp(engines, parity_reward, pid_source(2), cfg, SAMPLING)
+    cfg = replace(FILTER_CFG, rollout_batch_size=4)
+    trajs, stats = collect_groups_dp(engines, parity_reward, pid_source(2), cfg)
     assert stats["groups"] == 2 and len(trajs) == 4  # short, not hanging, not raising
 
 
@@ -203,18 +204,14 @@ def test_stash_consumed_before_new_generation():
     engine.drain()
     assert engine.n_inflight == 0 and len(engine._stash) == 2
 
-    cfg = CollectConfig(group_size=2, target_groups=2, strategy="filter")
-    trajs, stats = collect_groups_dp([engine], parity_reward, lambda n: [], cfg, SAMPLING)
+    cfg = replace(FILTER_CFG, rollout_batch_size=2)
+    trajs, stats = collect_groups_dp([engine], parity_reward, lambda n: [], cfg)
     assert stats["groups"] == 2 and stats["submitted"] == 0  # built PURELY from leftovers
     assert len(trajs) == 4
 
 
-def test_group_size_mismatch_fails_loud():
-    with pytest.raises(AssertionError, match="group_size"):
-        collect_groups_dp(
-            fresh([FakeStreamEngine()]), parity_reward, pid_source(1),
-            CollectConfig(group_size=4, target_groups=1), SAMPLING,  # n=2 != G=4
-        )
+# (the old group_size-vs-sampling.n mismatch assert is gone WITH the bug class:
+# RolloutConfig.n_samples_per_prompt is the single source of both numbers)
 
 
 # ---------------- collect_groups_dp: k engines (dealer + tally) ----------------
@@ -222,8 +219,8 @@ def test_group_size_mismatch_fails_loud():
 
 def test_dp_target_met_no_prompt_dealt_twice_ids_unique():
     engines = fresh([FakeStreamEngine(), FakeStreamEngine(finish_after=2)])
-    cfg = CollectConfig(group_size=2, target_groups=4, strategy="filter")
-    trajs, stats = collect_groups_dp(engines, parity_reward, pid_source(20), cfg, SAMPLING)
+    cfg = replace(FILTER_CFG, rollout_batch_size=4)
+    trajs, stats = collect_groups_dp(engines, parity_reward, pid_source(20), cfg)
     assert stats["groups"] == 4 and len(trajs) == 8  # global target met exactly
     # group_ids restamped 0..target-1, one pid per group, no pid in two groups
     by_gid = {gid: {t.meta["pid"] for t in trajs if t.meta["group_id"] == gid} for gid in range(4)}
@@ -238,8 +235,8 @@ def test_dp_fast_engine_deals_strictly_more():
     # 2nd prompt degenerate, replacements keep opening and only the fast
     # engine is awake to claim them (load balance OBSERVED, not assumed).
     engines = fresh([PacedEngine(finish_after=1), PacedEngine(finish_after=50)])
-    cfg = CollectConfig(group_size=2, target_groups=6, strategy="filter")
-    trajs, stats = collect_groups_dp(engines, parity_reward, pid_source(60, deg_every=2), cfg, SAMPLING)
+    cfg = replace(FILTER_CFG, rollout_batch_size=6)
+    trajs, stats = collect_groups_dp(engines, parity_reward, pid_source(60, deg_every=2), cfg)
     assert stats["groups"] == 6
     assert stats["submitted_e0"] > stats["submitted_e1"]
     assert not any(t.meta["deg"] for t in trajs)  # filtering still exact under threads
@@ -249,20 +246,20 @@ def test_dp_burst_cap_prevents_hoarding():
     # k=2, target=4 -> burst=2: even the first collector to run can commit at
     # most 2 prompts before others wake (the late-binding half of the design).
     engines = fresh([FakeStreamEngine(finish_after=3), FakeStreamEngine(finish_after=3)])
-    cfg = CollectConfig(group_size=2, target_groups=4, strategy="filter")
-    _, stats = collect_groups_dp(engines, parity_reward, pid_source(20), cfg, SAMPLING)
+    cfg = replace(FILTER_CFG, rollout_batch_size=4)
+    _, stats = collect_groups_dp(engines, parity_reward, pid_source(20), cfg)
     assert stats["submitted_e0"] <= 2 + stats["groups_dropped"]
     assert stats["submitted_e1"] <= 2 + stats["groups_dropped"]
 
 
 def test_dp_leftovers_consumed_by_next_call():
     engines = fresh([FakeStreamEngine(), FakeStreamEngine(finish_after=30)])
-    cfg = CollectConfig(group_size=2, target_groups=3, strategy="filter")
-    _, stats = collect_groups_dp(engines, parity_reward, pid_source(20), cfg, SAMPLING)
+    cfg = FILTER_CFG  # rollout_batch_size=3
+    _, stats = collect_groups_dp(engines, parity_reward, pid_source(20), cfg)
     if stats["leftover_inflight"] == 0:  # scheduling let the slow engine finish: nothing to check
         return
     n_before = stats["submitted"]
-    _, stats2 = collect_groups_dp(engines, parity_reward, pid_source(20), cfg, SAMPLING)
+    _, stats2 = collect_groups_dp(engines, parity_reward, pid_source(20), cfg)
     assert stats2["groups"] == 3
     assert stats2["submitted"] <= n_before  # leftovers reduced the new dealing needed
 
@@ -281,8 +278,7 @@ def run_controller(engines, num_iterations=3, interval=1):
         trainer=trainer,
         reward_fn=parity_reward,
         prompt_source=lambda n: [torch.randint(1, VOCAB, (3 + i % 2,)) for i in range(n)],
-        sampling=SAMPLING,
-        collect_cfg=CollectConfig(group_size=2, target_groups=2, strategy="filter"),
+        rollout_cfg=replace(FILTER_CFG, rollout_batch_size=2),
         num_iterations=num_iterations,
         publish_interval=interval,
     )
@@ -331,8 +327,7 @@ def _run_training(trainer_ctor, engines: list, num_iterations: int) -> tuple:
         trainer=trainer,
         reward_fn=parity_reward,
         prompt_source=_steady_source,
-        sampling=SAMPLING,
-        collect_cfg=CollectConfig(group_size=2, target_groups=2, strategy="fixed"),
+        rollout_cfg=replace(FILTER_CFG, rollout_batch_size=2, dynamic_sampling=False),
         num_iterations=num_iterations,
         publish_interval=1,
     )

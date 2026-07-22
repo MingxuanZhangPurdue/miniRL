@@ -185,7 +185,9 @@ miniRL/
 ├── pyproject.toml
 │
 ├── minirl/
-│   ├── config.py                # dataclass configs: CollectConfig + PlacementConfig
+│   ├── config.py                # per-component configs, slime field names (docs/config.md):
+│   │                            #   RolloutConfig (generation+collection), DataConfig
+│   │                            #   (prompt dataset), PlacementConfig (GPU split)
 │   │                            #   (single-node GPU split, slime's layout — §11)
 │   ├── logging.py               # [done] metrics_logger: the on_metrics callback —
 │   │                            #   namespacing + derived metrics + iteration-as-step;
@@ -346,7 +348,8 @@ miniRL/
 ├── tests/                       # correctness tests (see §8)
 ├── docs/                        # one short note per topic. Exist: sync_training.md,
 │                                #   async_training.md, precision.md, agentic_rl.md,
-│                                #   packing.md, fast_rl.md (continuous batching +
+│                                #   packing.md, config.md (per-component configs,
+│                                #   slime names), fast_rl.md (continuous batching +
 │                                #   in-flight updates: why), async_tier2.md (same:
 │                                #   how, file by file); production_gap.md to come
 └── notes/                       # THEORY derivations, imported from the author's

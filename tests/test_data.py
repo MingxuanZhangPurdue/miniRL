@@ -11,7 +11,8 @@ import torch
 from transformers import AutoTokenizer
 
 from minirl.data.chat import encode_conversation, encode_prompt
-from minirl.data.prompts import HFPromptSource, gsm8k_row
+from minirl.config import DataConfig
+from minirl.data.prompts import HFPromptSource, gsm8k_row, keyed_row_fn
 from minirl.data.sft import sft_batches
 
 # Override to vet a NEW model family's chat template + assistant masking:
@@ -97,36 +98,55 @@ def test_single_turn_and_system_prompt(tok):
 # ---------------- prompts.py ----------------
 
 
+GSM8K_CFG = DataConfig(prompt_data="fake/gsm8k", input_key="question", label_key="answer")
+
+
 def test_gsm8k_row_adapter():
     messages, meta = gsm8k_row({"question": " What is 2+2? ", "answer": "It is 4.\n#### 4"})
     assert messages == [{"role": "user", "content": "What is 2+2?"}]
-    assert meta == {"answer": "It is 4.\n#### 4"}
+    assert meta == {"label": "It is 4.\n#### 4"}
+
+
+def test_keyed_row_fn_maps_label():
+    fn = keyed_row_fn("question", "answer")
+    messages, meta = fn({"question": "q", "answer": "#### 7"})
+    assert messages == [{"role": "user", "content": "q"}]
+    assert meta == {"label": "#### 7"}  # FIXED meta key, whatever the dataset column
+    assert keyed_row_fn("question", None)({"question": "q"})[1] == {}
 
 
 def test_prompt_source_shape_and_meta(tok):
     ds = FakeDataset([{"question": f"q{i}", "answer": f"#### {i}"} for i in range(5)])
-    src = HFPromptSource(ds, tok, row_fn=gsm8k_row, seed=0)
+    src = HFPromptSource(ds, tok, GSM8K_CFG, row_fn=gsm8k_row)
     out = src(3)
     assert len(out) == 3
     ids, meta = out[0]
-    assert ids.dtype == torch.long and "answer" in meta
+    assert ids.dtype == torch.long and "label" in meta
 
 
 def test_prompt_source_epoch_wraps_and_reshuffles(tok):
     ds = FakeDataset([{"question": f"q{i}", "answer": str(i)} for i in range(4)])
-    src = HFPromptSource(ds, tok, seed=0)
-    first_epoch = [m["answer"] for _, m in src(4)]
+    src = HFPromptSource(ds, tok, GSM8K_CFG)  # generic keyed row_fn from the cfg
+    first_epoch = [m["label"] for _, m in src(4)]
     assert sorted(first_epoch) == ["0", "1", "2", "3"]  # covers the whole set
-    second_epoch = [m["answer"] for _, m in src(4)]
+    second_epoch = [m["label"] for _, m in src(4)]
     assert sorted(second_epoch) == ["0", "1", "2", "3"]  # wraps to a full new epoch
     assert first_epoch != second_epoch or True  # reshuffle (may coincide for tiny sets)
 
 
 def test_prompt_source_deterministic(tok):
     ds = FakeDataset([{"question": f"q{i}", "answer": str(i)} for i in range(6)])
-    a = [m["answer"] for _, m in HFPromptSource(ds, tok, seed=7)(6)]
-    b = [m["answer"] for _, m in HFPromptSource(ds, tok, seed=7)(6)]
+    cfg = DataConfig(prompt_data="fake", input_key="question", label_key="answer", rollout_seed=7)
+    a = [m["label"] for _, m in HFPromptSource(ds, tok, cfg)(6)]
+    b = [m["label"] for _, m in HFPromptSource(ds, tok, cfg)(6)]
     assert a == b
+
+
+def test_prompt_source_no_shuffle_is_dataset_order(tok):
+    ds = FakeDataset([{"question": f"q{i}", "answer": str(i)} for i in range(4)])
+    cfg = DataConfig(prompt_data="fake", input_key="question", label_key="answer",
+                     rollout_shuffle=False)
+    assert [m["label"] for _, m in HFPromptSource(ds, tok, cfg)(4)] == ["0", "1", "2", "3"]
 
 
 # ---------------- sft.py ----------------

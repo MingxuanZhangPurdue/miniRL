@@ -1,10 +1,12 @@
-"""Typed configs. One experiment == one config; YAML/CLI loading comes with
-the trainer. Per-algorithm loss configs live next to their loss (minirl/algos/*)
-so each file is self-contained; this module holds cross-cutting configs only.
+"""Typed configs, one per COMPONENT, reusing slime's argument names so a
+slime recipe translates field-for-field (docs/config.md). Per-algorithm loss
+configs live next to their loss (minirl/algos/*) and the trainer config lives
+in minirl/megatron.py; this module holds the cross-cutting rollout side.
 """
 
 from dataclasses import dataclass
-from typing import Literal
+
+from minirl.rollout.types import SamplingParams
 
 
 @dataclass(frozen=True)
@@ -34,13 +36,45 @@ class PlacementConfig:
 
 
 @dataclass(frozen=True)
-class CollectConfig:
-    """Batch collection for RL (controllers/fully_async.collect_groups_dp)."""
+class RolloutConfig:
+    """Generation + collection for one training batch: sampling knobs and
+    batch shape in one object (controllers/fully_async). sampling_params()
+    derives the engine wire-type — field names here follow slime; the wire
+    type mirrors vllm.SamplingParams.
+    """
 
-    group_size: int = 8  # G completions per prompt
-    target_groups: int = 32  # P surviving groups per training batch
-    # "fixed": take target_groups prompts, keep everything.
-    # "filter": DAPO dynamic sampling / slime dynamic_sampling_filter — drop
-    #           zero-gradient groups (reward std ~ 0), keep collecting.
-    strategy: Literal["fixed", "filter"] = "fixed"
-    max_rounds: int = 20  # budget: at most max_rounds*target_groups groups generated per call
+    # batch shape
+    rollout_batch_size: int = 32  # prompts (== surviving groups) per training batch
+    n_samples_per_prompt: int = 8  # G: completions per prompt (one request IS one group)
+    # sampling
+    rollout_temperature: float = 1.0
+    rollout_top_p: float = 1.0
+    rollout_top_k: int = -1  # -1 = disabled
+    rollout_max_response_len: int = 512
+    # dynamic sampling: drop zero-gradient groups (reward std ~ 0), keep
+    # collecting until rollout_batch_size survive (DAPO / slime filter)
+    dynamic_sampling: bool = False
+    over_sampling_rounds: int = 20  # budget: <= this * rollout_batch_size groups generated per call
+
+    def sampling_params(self) -> SamplingParams:
+        """Derive the engine wire-type for one request (a whole group)."""
+        return SamplingParams(
+            temperature=self.rollout_temperature,
+            top_p=self.rollout_top_p,
+            top_k=self.rollout_top_k,
+            max_new_tokens=self.rollout_max_response_len,
+            n=self.n_samples_per_prompt,
+        )
+
+
+@dataclass(frozen=True)
+class DataConfig:
+    """Where prompts come from (slime's Data&Dataset group). input_key/label_key
+    drive a generic row adapter; a custom row_fn is the escape hatch."""
+
+    prompt_data: str  # dataset id/path — recorded here; the recipe loads it (split/config aware)
+    input_key: str = "input"  # row key -> the user message
+    label_key: str | None = None  # row key -> meta["label"] (the reward's gold answer)
+    apply_chat_template: bool = True
+    rollout_shuffle: bool = True  # shuffle prompts each epoch (seeded)
+    rollout_seed: int = 0

@@ -70,7 +70,7 @@ import torch.distributed as dist
 from torch import Tensor
 
 from minirl.algos.advantage import grpo_advantages
-from minirl.config import CollectConfig
+from minirl.config import RolloutConfig
 from minirl.rollout.batching import make_batch
 from minirl.rollout.filtering import GroupFilter, RewardFn, reward_nonzero_std
 from minirl.rollout.types import SamplingParams, Trajectory
@@ -89,7 +89,7 @@ class _Tally:
         self._lock = threading.Lock()
         self._source = prompt_source  # called ONLY under the lock (the dealer)
         self._target = target
-        self._budget = budget  # global generated-groups cap (max_rounds * target)
+        self._budget = budget  # global generated-groups cap (over_sampling_rounds * target)
         self._burst = burst  # per-deal cap: ceil(target / k) minus own in-flight
         self.kept: list[list[Trajectory]] = []  # groups kept, all engines, arrival order
         self.generated = 0
@@ -193,28 +193,25 @@ def collect_groups_dp(
     engines: list,
     reward_fn: RewardFn | None,
     prompt_source: Callable[[int], list],
-    cfg: CollectConfig,
-    sampling: SamplingParams,
+    cfg: RolloutConfig,
     group_filter: GroupFilter | None = None,
 ) -> tuple[list[Trajectory], dict]:
-    """Collect cfg.target_groups groups from k engines sharing one dealer+tally.
+    """Collect cfg.rollout_batch_size groups from k engines sharing one dealer+tally.
 
     May return SHORT if the source exhausts or the budget hits — check
     stats["groups"]. Spawns one owner thread per engine for the duration of
     the call (thread spin-up is microseconds — irrelevant next to a
     collection).
     """
-    assert sampling.n == cfg.group_size, (
-        f"sampling.n={sampling.n} != cfg.group_size={cfg.group_size} — one request IS one group"
-    )
-    if group_filter is None and cfg.strategy == "filter":
+    sampling = cfg.sampling_params()  # one request IS one group (n == n_samples_per_prompt)
+    if group_filter is None and cfg.dynamic_sampling:
         group_filter = reward_nonzero_std
 
     tally = _Tally(
         prompt_source,
-        target=cfg.target_groups,
-        budget=cfg.max_rounds * cfg.target_groups,
-        burst=-(-cfg.target_groups // len(engines)),  # ceil(target / k)
+        target=cfg.rollout_batch_size,
+        budget=cfg.over_sampling_rounds * cfg.rollout_batch_size,
+        burst=-(-cfg.rollout_batch_size // len(engines)),  # ceil(target / k)
     )
     # Pre-register leftovers from the previous call so the first deals do not
     # over-commit. Safe engine touch: the caller owns ALL engines here (no
@@ -263,8 +260,7 @@ def fit_async(
     # tests/fake_trainer.Trainer locally)
     reward_fn: Callable[[Trajectory], float],
     prompt_source: Callable[[int], list[Tensor]],
-    sampling: SamplingParams,
-    collect_cfg: CollectConfig,
+    rollout_cfg: RolloutConfig,
     num_iterations: int,
     publish_interval: int = 1,  # staleness bound is interval + 1
     on_metrics: Callable[[dict], None] | None = None,
@@ -304,7 +300,7 @@ def fit_async(
         try:
             t0 = time.perf_counter()
             trajs, stats = collect_groups_dp(
-                engines, reward_fn, prompt_source, collect_cfg, sampling
+                engines, reward_fn, prompt_source, rollout_cfg
             )
             assert trajs, "prompt_source exhausted / all groups filtered — nothing to train on"
             stats["t_generate"] = time.perf_counter() - t0

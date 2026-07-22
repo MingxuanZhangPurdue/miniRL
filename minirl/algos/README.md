@@ -51,7 +51,7 @@ k3   = e^d - d - 1,  d = log pi_ref - log pi_theta                   unbiased KL
 | **Dr. GRPO** (arXiv:2503.20783) | `"dr_grpo"` | **config of GRPO** | GRPO with `grpo_std_normalization=False` (no ÷std in A_i) | `"token_mean"`; paper-exact: `loss_agg=<max_new_tokens>` |
 
 DAPO's 4th change — dynamic sampling — is batch COLLECTION, not loss math:
-`CollectConfig(strategy="filter")` (rollout/sampling.py) drops zero-gradient
+`RolloutConfig(dynamic_sampling=True)` (controllers/fully_async.py) drops zero-gradient
 groups (all rewards equal) and pulls more prompts.
 
 Every loss optionally composes `[ * w_t ]` (TIS, `use_tis=True` — the async

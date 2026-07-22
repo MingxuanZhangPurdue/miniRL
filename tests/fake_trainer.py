@@ -184,7 +184,7 @@ class Trainer:
         b = mb.input_ids.shape[0]
         assert b % self.world == 0, (
             f"batch rows {b} not divisible by world size {self.world} — "
-            "size target_groups*G accordingly"
+            "size rollout_batch_size*G accordingly"
         )
         denom = minibatch_denom(self.loss_agg, mb.loss_mask)  # full mask FIRST, slice after
         denom = denom.to(self.device) if isinstance(denom, torch.Tensor) else denom

@@ -5,7 +5,7 @@ import time
 import pytest
 import torch
 
-from minirl.config import CollectConfig
+from minirl.config import RolloutConfig
 from minirl.controllers import collect_groups_dp
 from minirl.rewards import code_reward, extract_code, extract_final_answer, grade_answer, math_reward, run_python
 from minirl.rewards.math import extract_boxed
@@ -91,8 +91,7 @@ def test_sandbox_stray_writes_land_in_tempdir(tmp_path):
 
 # ---------------- label plumbing through the collector ----------------
 
-SAMPLING2 = SamplingParams(max_new_tokens=2, n=2)
-CFG2 = CollectConfig(group_size=2, target_groups=2)
+CFG2 = RolloutConfig(rollout_batch_size=2, n_samples_per_prompt=2, rollout_max_response_len=2)
 
 
 class StreamShim:
@@ -148,7 +147,7 @@ def mk_traj(prompt: torch.Tensor, last: int) -> Trajectory:
 
 def test_prompt_meta_reaches_reward_fn():
     def prompt_source(n):
-        return [(torch.tensor([10 + i]), {"answer": str(20 + i)}) for i in range(n)]
+        return [(torch.tensor([10 + i]), {"label": str(20 + i)}) for i in range(n)]
 
     def generate(prompts):  # 2 samples per prompt; sample index encoded in last token
         return [mk_traj(p, j) for p in prompts for j in range(2)]
@@ -156,13 +155,13 @@ def test_prompt_meta_reaches_reward_fn():
     seen: list[str] = []
 
     def reward_fn(traj):
-        seen.append(traj.meta["answer"])  # label arrived BEFORE reward ran
+        seen.append(traj.meta["label"])  # label arrived BEFORE reward ran
         return float(traj.input_ids[-1].item())
 
     engine = StreamShim(generate)
-    trajs, stats = collect_groups_dp([engine], reward_fn, prompt_source, CFG2, SAMPLING2)
+    trajs, stats = collect_groups_dp([engine], reward_fn, prompt_source, CFG2)
     assert stats["groups"] == 2 and seen == ["20", "20", "21", "21"]
-    assert trajs[0].meta["answer"] == "20" and trajs[2].meta["answer"] == "21"
+    assert trajs[0].meta["label"] == "20" and trajs[2].meta["label"] == "21"
     assert trajs[0].meta["group_id"] == 0  # group ids still assigned
 
 
@@ -179,6 +178,6 @@ def test_reward_fn_none_for_env_scored_episodes():
     engine = StreamShim(generate)
     trajs, _ = collect_groups_dp(
         [engine], None, lambda n: [torch.tensor([1])] * n,
-        CollectConfig(group_size=2, target_groups=1), SAMPLING2,
+        RolloutConfig(rollout_batch_size=1, n_samples_per_prompt=2, rollout_max_response_len=2),
     )
     assert all(t.reward == 0.75 for t in trajs)  # untouched by the collector

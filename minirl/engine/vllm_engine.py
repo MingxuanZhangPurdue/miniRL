@@ -140,6 +140,7 @@ class VLLMEngine:
                     n=1,
                     temperature=params.temperature,
                     top_p=params.top_p,
+                    top_k=params.top_k,
                     max_tokens=params.max_new_tokens,
                     logprobs=0,  # attach the SAMPLED token's logprob, computed at sampling time
                 ),

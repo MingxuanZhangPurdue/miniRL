@@ -27,7 +27,7 @@ LOSSES = {
     # ---- NAMED CONFIGS (file-vs-config rule: their loss bodies == GRPO's) ----
     # DAPO (arXiv:2503.14476): clip-higher + token-level reduce; no-KL is
     # already GRPO's default. Its 4th change, dynamic sampling, is batch
-    # collection: CollectConfig(strategy="filter") in controllers/fully_async.py.
+    # collection: RolloutConfig(dynamic_sampling=True) in controllers/fully_async.py.
     "dapo": (grpo_loss, partial(GRPOConfig, eps_clip_high=0.28, loss_agg="token_mean")),
     # Dr. GRPO (arXiv:2503.20783): drop the ÷std in the advantage + unbiased
     # reduce. PAPER-EXACT normalization needs the constant denominator, a

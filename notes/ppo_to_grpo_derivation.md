@@ -77,7 +77,7 @@ In code this is one flag: `grpo_std_normalization=False`.
 
 > Note the degenerate case either way: all $G$ rewards equal $\Rightarrow A_i=0$ for the whole group —
 > zero gradient. That is a DATA problem, not a loss problem, and is fixed at collection time
-> (DAPO's dynamic sampling; `CollectConfig(strategy="filter")`).
+> (DAPO's dynamic sampling; `RolloutConfig(dynamic_sampling=True)`).
 
 ---
 

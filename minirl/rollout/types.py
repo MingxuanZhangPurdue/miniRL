@@ -29,6 +29,7 @@ class SamplingParams:
 
     temperature: float = 1.0
     top_p: float = 1.0
+    top_k: int = -1  # -1 = disabled
     max_new_tokens: int = 512
     n: int = 1  # completions per prompt (G in GRPO)
 

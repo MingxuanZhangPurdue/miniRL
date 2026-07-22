@@ -34,15 +34,13 @@ from transformers import AutoTokenizer
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from minirl.algos import GRPOConfig, grpo_loss
-from minirl.config import CollectConfig, PlacementConfig
+from minirl.config import DataConfig, PlacementConfig, RolloutConfig
 from minirl.controllers import fit_async
-from minirl.data import HFPromptSource
-from minirl.data.prompts import gsm8k_row
+from minirl.data import HFPromptSource, gsm8k_row
 from minirl.engine.vllm_engine import VLLMEngine
 from minirl.logging import metrics_logger
 from minirl.megatron import MegatronTrainConfig, MegatronTrainer, setup_distributed
 from minirl.rewards import make_math_reward_fn
-from minirl.rollout.types import SamplingParams
 
 MODEL = "Qwen/Qwen3-0.6B"
 
@@ -51,10 +49,10 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--train-gpus", type=int, default=1)
     ap.add_argument("--rollout-gpus", type=int, default=1)
-    ap.add_argument("--iterations", type=int, default=20)
-    ap.add_argument("--group-size", type=int, default=8)       # G
-    ap.add_argument("--target-groups", type=int, default=8)    # B = G * this
-    ap.add_argument("--max-new-tokens", type=int, default=512)
+    ap.add_argument("--num-rollout", type=int, default=20)          # training iterations
+    ap.add_argument("--n-samples-per-prompt", type=int, default=8)  # G
+    ap.add_argument("--rollout-batch-size", type=int, default=8)    # prompts per batch; B = G * this
+    ap.add_argument("--rollout-max-response-len", type=int, default=512)
     ap.add_argument("--lr", type=float, default=1e-6)
     ap.add_argument("--fp32", action="store_true",
                     help="disable bf16 (Megatron's default precision mode) — parity/debug runs only")
@@ -74,19 +72,21 @@ def main() -> None:
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     torch.cuda.set_device(local_rank)  # trainer rank r -> GPU r (trainer GPUs come first)
 
-    b = args.group_size * args.target_groups
+    b = args.rollout_batch_size * args.n_samples_per_prompt  # whole rollout = one optimizer step
     assert b % world == 0, f"B={b} not divisible by world={world}"
     loss_cfg = GRPOConfig(use_tis=True)
     train_cfg = MegatronTrainConfig(
         lr=args.lr, ppo_epochs=1, minibatch_size=b, micro_batch_size=8,
         bf16=not args.fp32, pack_max_tokens=args.pack_max_tokens,
     )
-    collect_cfg = CollectConfig(
-        group_size=args.group_size, target_groups=args.target_groups, strategy="filter"
+    rollout_cfg = RolloutConfig(
+        rollout_batch_size=args.rollout_batch_size,
+        n_samples_per_prompt=args.n_samples_per_prompt,
+        rollout_temperature=1.0, rollout_top_p=0.95,
+        rollout_max_response_len=args.rollout_max_response_len,
+        dynamic_sampling=True,
     )
-    sampling = SamplingParams(
-        temperature=1.0, top_p=0.95, max_new_tokens=args.max_new_tokens, n=args.group_size
-    )
+    data_cfg = DataConfig(prompt_data="openai/gsm8k", input_key="question", label_key="answer")
 
     # trainer FIRST: Megatron initializes model parallelism + the CUDA
     # context before any engine mutates CUDA_VISIBLE_DEVICES.
@@ -97,7 +97,7 @@ def main() -> None:
         engines = [VLLMEngine(MODEL, gpu_id=g, seed=g) for g in placement.rollout_gpu_ids]
         tok = AutoTokenizer.from_pretrained(MODEL)
         ds = load_dataset("openai/gsm8k", "main", split="train")
-        prompt_source = HFPromptSource(ds, tok, row_fn=gsm8k_row, seed=0)
+        prompt_source = HFPromptSource(ds, tok, data_cfg, row_fn=gsm8k_row)
         reward_fn = make_math_reward_fn(tok)
         if args.wandb:
             import wandb  # recipes only, never core
@@ -105,9 +105,10 @@ def main() -> None:
             run = wandb.init(
                 project=args.project, entity=args.entity, name=args.name,
                 config={"model": MODEL, "placement": asdict(placement), "algo": "grpo",
-                        "iterations": args.iterations, "loss": asdict(loss_cfg),
-                        "train": asdict(train_cfg), "collect": asdict(collect_cfg),
-                        "sampling": asdict(sampling)},
+                        "num_rollout": args.num_rollout, "loss": asdict(loss_cfg),
+                        "train": asdict(train_cfg), "rollout": asdict(rollout_cfg),
+                        "data": asdict(data_cfg),
+                        "reward_fn": reward_fn.__qualname__},  # reward is code, not config — record its name
             )
         print(f"rank 0: {len(engines)} engine(s) on GPUs {placement.rollout_gpu_ids}, "
               f"{world} trainer rank(s) on GPUs {placement.train_gpu_ids}")
@@ -118,9 +119,8 @@ def main() -> None:
             trainer=trainer,
             reward_fn=reward_fn,
             prompt_source=prompt_source,
-            sampling=sampling,
-            collect_cfg=collect_cfg,
-            num_iterations=args.iterations,
+            rollout_cfg=rollout_cfg,
+            num_iterations=args.num_rollout,
             publish_interval=1,
             on_metrics=metrics_logger(run),  # rank 0 only ever emits
         )
