@@ -99,28 +99,28 @@ def dolci_code_row(row: dict) -> tuple[list[dict], dict]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--train-gpus", type=int, default=1)
-    ap.add_argument("--rollout-gpus", type=int, default=1)
-    ap.add_argument("--num-rollout", type=int, default=20)          # training iterations
+    ap.add_argument("--train-gpus", type=int, default=2)
+    ap.add_argument("--rollout-gpus", type=int, default=2)
+    ap.add_argument("--num-rollout", type=int, default=200)          # training iterations
     ap.add_argument("--n-samples-per-prompt", type=int, default=8)  # G
-    ap.add_argument("--rollout-batch-size", type=int, default=8)    # prompts per batch; B = G * this
-    ap.add_argument("--rollout-max-response-len", type=int, default=1024)  # code needs room
+    ap.add_argument("--rollout-batch-size", type=int, default=32)    # prompts per batch; B = G * this
+    ap.add_argument("--rollout-max-response-len", type=int, default=8192)  # code needs room
     ap.add_argument("--rollout-max-prompt-len", type=int, default=2048,
                     help="DROP dataset rows whose templated prompt exceeds this")
-    ap.add_argument("--rollout-max-context-len", type=int, default=4096,
+    ap.add_argument("--rollout-max-context-len", type=int, default=10240,
                     help="the engines' context ceiling (vLLM max_model_len); generation "
                          "truncates at this wall regardless of the response cap")
     ap.add_argument("--lr", type=float, default=1e-6)
     ap.add_argument("--fp32", action="store_true",
                     help="disable bf16 (Megatron's default precision mode) — parity/debug runs only")
-    ap.add_argument("--pack-max-tokens", type=int, default=None,
+    ap.add_argument("--pack-max-tokens", type=int, default=16384,
                     help="pack each microbatch into dense pad-free rows under this token "
                          "budget (replaces --micro-batch-size as the grad-accum unit; "
                          "needs bf16). None = padded microbatches")
-    ap.add_argument("--eval-interval", type=int, default=None,
+    ap.add_argument("--eval-interval", type=int, default=20,
                     help="score the MBPP test split every N iterations (plus an "
                          "untrained baseline); None = no eval")
-    ap.add_argument("--eval-limit", type=int, default=200,
+    ap.add_argument("--eval-limit", type=int, default=100,
                     help="how many MBPP test prompts each eval scores")
     ap.add_argument("--enable-thinking", action="store_true",
                     help="let the model generate <think> reasoning as response tokens "
@@ -144,7 +144,17 @@ def main() -> None:
 
     b = args.rollout_batch_size * args.n_samples_per_prompt  # whole rollout = one optimizer step
     assert b % world == 0, f"B={b} not divisible by world={world}"
-    loss_cfg = GRPOConfig(use_tis=True)
+    loss_cfg = GRPOConfig(
+        eps_clip=0.2,
+        eps_clip_high=0.27,
+        use_kl_loss=False,
+        grpo_std_normalization=False,
+        loss_agg="token_mean",
+        use_tis=True,
+        tis_clip=float("inf"),
+        tis_clip_low=0,
+        tis_mode="clamp"
+    )
     train_cfg = MegatronTrainConfig(
         lr=args.lr, ppo_epochs=1, minibatch_size=b, micro_batch_size=8,
         bf16=not args.fp32, pack_max_tokens=args.pack_max_tokens,
