@@ -45,6 +45,12 @@ Upstream slime settings this loss assumes (dppo.py's paper config):
     --calculate-per-token-loss
         (token_mean aggregation — makes sum_of_sample_mean the token-mean
         reducer, dppo.py's loss_agg)
+    --use-rollout-logprobs
+        (slime SKIPS the pi_old recompute forward under this flag —
+        actor.py gates compute_log_prob on it — saving one full pass per
+        iteration; and it declares "the anchor is the engine", which is
+        DPPO's thesis. Compatible: DPPO sets no use_tis, so slime's
+        use_rollout_logprobs/use_tis exclusivity assert is satisfied.)
     rollout log probs must be present in the batch (the engine-side
     logprobs slime records at sampling time) — this loss asserts it.
 ================================================================================
