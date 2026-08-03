@@ -117,6 +117,10 @@ def main() -> None:
                     help="pack each microbatch into dense pad-free rows under this token "
                          "budget (replaces --micro-batch-size as the grad-accum unit; "
                          "needs bf16). None = padded microbatches")
+    ap.add_argument("--no-te", action="store_true",
+                    help="local layer spec instead of Transformer-Engine (also disables "
+                         "packing, which needs TE varlen kernels) — for environments "
+                         "where TE's prebuilt kernels fail")
     ap.add_argument("--eval-interval", type=int, default=20,
                     help="score the MBPP test split every N iterations (plus an "
                          "untrained baseline); None = no eval")
@@ -157,7 +161,8 @@ def main() -> None:
     )
     train_cfg = MegatronTrainConfig(
         lr=args.lr, ppo_epochs=1, minibatch_size=b, micro_batch_size=8,
-        bf16=not args.fp32, pack_max_tokens=args.pack_max_tokens,
+        bf16=not args.fp32, use_te_layers=not args.no_te,
+        pack_max_tokens=None if args.no_te else args.pack_max_tokens,
     )
     rollout_cfg = RolloutConfig(
         rollout_batch_size=args.rollout_batch_size,
