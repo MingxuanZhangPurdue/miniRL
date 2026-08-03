@@ -49,8 +49,41 @@ what an RL framework owns vs what the algorithm owns.
                     broadcast (B, T)                upstream; arrives per-sample (R,)
                                                     lists, cat -> (S,)
 
-  S = sum of response lengths across the microbatch's samples (slime packs
-  sequences; T_pack is the packed row length the logits cover).
+--------------------------------------------------------------------------------
+ SHAPES — slime's packed flat layout (the legend for every tensor below)
+--------------------------------------------------------------------------------
+One microbatch = k whole samples PACKED back to back into one dense row
+(no padding anywhere). Two lengths per sample i: P_i prompt tokens and
+R_i response tokens.
+
+    sample i    [ prompt_i (P_i) | response_i (R_i) ]
+    packed row  [ p_0 | r_0 | p_1 | r_1 | ... | p_{k-1} | r_{k-1} ]
+    T_pack      = sum_i (P_i + R_i)   -> `logits` is (1, T_pack, V): the raw
+                                         forward output over the WHOLE row
+
+The loss only ever touches RESPONSE tokens. slime hands them over as
+python LISTS with one (R_i,) tensor per sample; the working convention is
+torch.cat(list) -> one flat vector. Define
+
+    S = sum_i R_i                     -> every "(S,)" annotation below
+
+    batch["advantages"]        list of (R_i,) --cat-> (S,)  A_i, repeated
+                                                            over sample i's
+                                                            R_i entries
+    batch["log_probs"]         list of (R_i,) --cat-> (S,)  log pi_old
+    batch["rollout_log_probs"] list of (R_i,) --cat-> (S,)  log pi_engine
+    batch["ref_log_probs"]     list of (R_i,) --cat-> (S,)  log pi_ref
+    batch["loss_masks"]        list of (R_i,) — NOT cat'ed here: consumed
+                                              INSIDE sum_of_sample_mean
+    helper out["log_probs"]    list of (R_i,) --cat-> (S,)  log pi_theta,
+                                              the ONLY grad-carrying tensor
+
+Translation from grpo.py's (B, T): B padded rows of full prompt+response
+length become one flat (S,) vector with prompts and padding REMOVED and
+samples glued end to end. B and T don't exist here; sample boundaries
+survive only in the list structure, which sum_of_sample_mean uses for its
+per-sample (seq-mean) denominators. Index s in (S,) = "the s-th response
+token of the microbatch, counting across sample boundaries".
 
 --------------------------------------------------------------------------------
  GROUNDED IN SLIME  (backends/megatron_utils/loss.py, read 2026-08)
@@ -102,9 +135,13 @@ def grpo_loss_slime(args, batch, logits, sum_of_sample_mean):
         response_lengths=batch["response_lengths"],
         with_entropy=False,
     )
+    # list of (R_i,) -> flat (S,): log pi_theta(y_t) for every response token
+    # of every sample, glued end to end (see SHAPES in the banner).
     new = torch.cat(out["log_probs"], dim=0)  # (S,) f32, WITH GRAD
 
-    adv = torch.cat(batch["advantages"], dim=0)  # (S,) FROZEN, constant per sample
+    # A_i is one scalar per sample, already repeated over that sample's R_i
+    # entries upstream — the flat twin of grpo.py's row-constant (B, T) adv.
+    adv = torch.cat(batch["advantages"], dim=0)  # (S,) f32, FROZEN
     # pi_old — slime's fallback ladder: trainer recompute when present,
     # engine logprobs when told to, on-policy detach otherwise.
     if args.use_rollout_logprobs:
@@ -112,10 +149,11 @@ def grpo_loss_slime(args, batch, logits, sum_of_sample_mean):
     elif batch.get("log_probs"):
         old = torch.cat(batch["log_probs"], dim=0)  # (S,) FROZEN
     else:
-        old = new.detach()  # sync fresh-weights case: ratio == 1 exactly
+        old = new.detach()  # (S,) sync fresh-weights case: ratio == 1 exactly
 
-    # ---- importance ratio  r_t = pi_theta / pi_old ---- (grpo.py verbatim;
-    # no mask-before-exp: the flat layout has no padding positions)
+    # ---- importance ratio  r_t = pi_theta / pi_old ---- (grpo.py verbatim,
+    # minus the mask-before-exp trick: every one of the S positions is a real
+    # response token, so there is no padding to keep finite)
     log_ratio = new - old  # (S,)
     ratio = log_ratio.exp()  # (S,)  grad flows through `new`
 
@@ -124,10 +162,13 @@ def grpo_loss_slime(args, batch, logits, sum_of_sample_mean):
     clipped = ratio.clamp(1.0 - args.eps_clip, 1.0 + eps_high)  # (S,)
     loss_map = -torch.minimum(ratio * adv, clipped * adv)  # (S,) per-token, unreduced
 
+    # Metric maps are (S,) per-token too; sum_of_sample_mean applies the
+    # loss_masks and per-sample denominators internally, returning a scalar —
+    # the flat twin of grpo.py's masked_mean(x, mask).
     metrics = {
         "pg_clipfrac": sum_of_sample_mean((clipped * adv < ratio * adv).float()).detach(),
         "ppo_kl": sum_of_sample_mean(ratio.detach() - 1 - log_ratio.detach()).detach(),
-        "ratio_max": ratio.detach().max(),  # over response tokens (flat layout)
+        "ratio_max": ratio.detach().max(),  # scalar — max over ALL S response tokens
     }
 
     # ---- TIS — engine<->trainer mismatch correction, pg term ONLY ----
