@@ -85,6 +85,20 @@ class VLLMEngine:
         old_cvd = os.environ.get("CUDA_VISIBLE_DEVICES")
         if gpu_id is not None:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        # Under torchrun, TORCHELASTIC_USE_AGENT_STORE (+ the rendezvous
+        # identity below) tells every torch.distributed init in this process
+        # TREE to join the elastic agent's store instead of hosting its own.
+        # The spawned EngineCore inherits that env, so its private world-1
+        # init_process_group() waits forever for an agent store that is not
+        # its rendezvous to answer. Scrub the identity around construction;
+        # the parent's own process group is already initialized and keeps
+        # its store regardless of env.
+        torchrun_env = ("TORCHELASTIC_USE_AGENT_STORE", "TORCHELASTIC_RUN_ID",
+                        "TORCHELASTIC_RESTART_COUNT", "TORCHELASTIC_MAX_RESTARTS",
+                        "MASTER_ADDR", "MASTER_PORT", "RANK", "LOCAL_RANK",
+                        "WORLD_SIZE", "LOCAL_WORLD_SIZE", "GROUP_RANK",
+                        "GROUP_WORLD_SIZE", "ROLE_RANK", "ROLE_WORLD_SIZE")
+        saved_env = {k: os.environ.pop(k) for k in torchrun_env if k in os.environ}
         engine_kwargs.setdefault("dtype", "bfloat16")
         engine_kwargs.setdefault("max_model_len", 4096)
         try:
@@ -92,6 +106,7 @@ class VLLMEngine:
                 EngineArgs(model=model_name_or_path, **engine_kwargs)
             )
         finally:
+            os.environ.update(saved_env)
             if gpu_id is not None:
                 if old_cvd is None:
                     os.environ.pop("CUDA_VISIBLE_DEVICES", None)
