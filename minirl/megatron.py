@@ -92,6 +92,11 @@ class MegatronTrainConfig:
     bf16: bool = True  # Megatron's one precision mode: bf16 params + fp32 masters
     grad_reduce_in_fp32: bool = True  # full-Megatron grad fidelity (the fake reduces in bf16)
     use_te_layers: bool = True  # Transformer-Engine layer spec — fused kernels + FlashAttention/cuDNN attention dispatch
+    recompute: bool = False  # full activation recomputation (uniform, per layer):
+    #   backward re-runs each layer's forward instead of storing activations.
+    #   ~1/3 more compute; REQUIRED for long sequences on the local spec,
+    #   whose unfused attention otherwise stores fp32 (heads, T, T) probs
+    #   per layer.
     use_distributed_optimizer: bool = True  # shard optimizer states across DP (ZeRO-1 style)
     pack_max_tokens: int | None = None  # token budget per fwd/bwd: each microbatch
     #   becomes ONE dense pad-free row of whole sequences under this budget
@@ -153,6 +158,10 @@ class MegatronTrainer:
             from megatron.core.transformer import transformer_block
             from megatron.core.transformer.torch_norm import WrappedTorchNorm
             transformer_block.LayerNormImpl = WrappedTorchNorm
+        if cfg.recompute:
+            provider.recompute_granularity = "full"
+            provider.recompute_method = "uniform"
+            provider.recompute_num_layers = 1
         # fused weight-grad accumulation is an apex CUDA extension; without it
         # ColumnParallelLinear refuses to construct rather than fall back.
         try:

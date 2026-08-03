@@ -83,6 +83,66 @@ Gotchas, each hit for real on 2026-08-02:
   helpers with a UserWarning. Accepted — TE provides the fused paths that
   matter.
 
+## 4a. TE on the pod — findings and fix ladder (2026-08-03, learned in blood)
+
+The §4 env imports cleanly but TE's prebuilt KERNELS are broken on this
+pod class (A100 + driver 580.126 = CUDA 13.0). Symptom set, all verified
+in isolation:
+
+- native RMSNorm: `CUDA Error: invalid argument` on a toy 8x1024 bf16
+  tensor (both tuned and general kernel paths, clean LD paths);
+- cuDNN-norm alternative (`NVTE_NORM_FWD_USE_CUDNN=1`): cudnn-frontend
+  `build_operation_graph` assertion — also dead;
+- TE 2.15/2.14 wheels: `undefined symbol` at import (their torch shims
+  target older torch ABIs; only 2.16.1 matches torch 2.11);
+- TE cannot be uninstalled as a workaround: **megatron-bridge
+  hard-imports transformer_engine** (peft/lora_layers.py);
+- mcore picks a TE norm for TransformerBlock's OWN final_layernorm
+  whenever TE merely imports — fixed in minirl (c1bec8e), local spec now
+  truly local.
+
+Root-cause hypothesis: the cu13 wheel line is built against a newer
+CUDA 13.x than the driver (it demands cuBLAS 13.6 symbols; the driver
+speaks 13.0), and/or sm_80 launch configs regressed in wheels tuned for
+Hopper/Blackwell.
+
+**PROBE FIRST on any new pod — 10 seconds, before any long setup:**
+
+    python -c "import torch, transformer_engine.pytorch as te; \
+    x=torch.randn(8,1024,device='cuda',dtype=torch.bfloat16); \
+    print(te.RMSNorm(1024,params_dtype=torch.bfloat16).cuda()(x).sum())"
+
+Fix ladder, in order of preference:
+
+1. **Pick a pod whose driver reports CUDA >= 13.1** (nvidia-smi header)
+   and re-probe. Cheapest test of the skew hypothesis.
+2. **Build TE from source** against the venv's exact torch: pip cu13
+   toolchain (`nvidia-cuda-nvcc` etc.), `CUDA_HOME` into the venv,
+   `NVTE_CUDA_ARCHS=80`, big MAX_JOBS. This is THE slime lesson: slime's
+   Dockerfile never mixes prebuilt engine/trainer CUDA stacks — it
+   installs the inference engine first (its torch wins) and COMPILES
+   apex/TE/flash-attn against that torch. Wheels-only mixing is the
+   failure mode, not the platform.
+3. **Run without TE** — validated 2026-08-03 path: recipe flag `--no-te`
+   (local spec; c1bec8e makes it complete) + `--micro-batch-size 1-2` +
+   `MegatronTrainConfig.recompute=True` (full activation recomputation —
+   REQUIRED at 8-10k-token sequences: unfused attention stores fp32
+   (heads,T,T) per layer, ~4.5GB/layer at T=8.4k; the fused-CE fp32
+   logits over the 152k vocab cost 0.6MB/token on top). ~1.33x compute,
+   correct math, no packing.
+4. The structural fix: **the engine-server split (docs/engine_server.md)**
+   — engines in their own processes with their own venv, trainer venv
+   without vllm entirely. Then the trainer env can be built to make TE
+   happy (or be an NGC container) without negotiating with vLLM's pins,
+   which is how this whole class of problem dies. miniSlime rule of
+   thumb: slime separates these concerns with server processes; so do we.
+
+Memory math worth remembering (why "0.6B OOMs an 80GB card"): the model
+is 1.2GB; the killers are per-TOKEN costs — fp32 logits 608KB/token
+(vocab 151,936) and unfused-attention fp32 probs ~16.T.4 bytes/token/
+layer. Packing (TE) bounds the first; flash attention (TE) kills the
+second. No TE = pay both or recompute.
+
 ## 5. Verify (all passed 2026-08-02)
 
     python - <<'EOF'
@@ -112,12 +172,22 @@ Quirk seen on this pod: GPU 0 reported ~16GB used with zero processes
 (stale host accounting). Harmless on 80GB cards; re-check with
 `nvidia-smi --query-compute-apps=pid --format=csv` if memory gets tight.
 
-## 6. Not yet run (next session picks up here)
+## 6. Session log 2026-08-03 + what the next session runs
 
-The P3 ladder, in order: recipe 04 (engine smoke) -> 08 `--bf16` then
-`--packed` (Megatron+TE parity in THIS env) -> 09 one-step Dolci smoke
-(1+1, `--num-rollout 1 --rollout-batch-size 8 --eval-interval 0`) ->
-09 full 2+2 with `--wandb`. Long runs go in tmux.
+The 2026-08-03 shakedown validated the ROLLOUT half end to end on 4xA100
+(placement engines-on-2/3 ranks-on-0/1, async collect, dynamic sampling,
+sandboxed code reward, MBPP baseline eval, recipe 04 full PASS) and paid
+for five trainer-side fixes, all on main: 65e04f0 (apex fallback),
+bace6df (torchrun-env scrub around engine construction), 2a18626
+(--no-te), c1bec8e (block final_layernorm), 8df640d (--micro-batch-size).
+The 10-iteration Dolci run itself is STILL OWED — it died on the §4a
+memory wall before the recompute lever existed.
+
+Next session ladder (post engine-server split): rpc test locally ->
+recipe 04 through one server (1 GPU) -> TE probe (§4a) and pick the TE
+or no-TE trainer config -> 09 one-step smoke (1 trainer + 1 server) ->
+09 2+2 `--wandb`, 10 iterations, timed. Long runs in tmux; use direct
+TCP ssh; never put a process's own name in a pkill pattern over ssh.
 
 ## 7. Reflection — make setup a one-liner from the repo
 
