@@ -145,6 +145,14 @@ class MegatronTrainer:
         provider.params_dtype = torch.bfloat16 if cfg.bf16 else torch.float32
         if not cfg.use_te_layers:
             provider.transformer_layer_spec = local_layer_spec
+            # the layer spec does not reach TransformerBlock's OWN
+            # final_layernorm: mcore module-globally prefers a TE norm there
+            # whenever transformer_engine merely IMPORTS (and it must stay
+            # installed — megatron-bridge hard-imports it). Local means
+            # local: swap the block-level choice to the torch norm too.
+            from megatron.core.transformer import transformer_block
+            from megatron.core.transformer.torch_norm import WrappedTorchNorm
+            transformer_block.LayerNormImpl = WrappedTorchNorm
         # fused weight-grad accumulation is an apex CUDA extension; without it
         # ColumnParallelLinear refuses to construct rather than fall back.
         try:
