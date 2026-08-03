@@ -21,6 +21,7 @@ by trainer.
 """
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 from torch import Tensor
 
@@ -31,6 +32,9 @@ from minirl.rollout.types import Batch
 @dataclass(frozen=True)
 class SFTConfig:
     loss_agg: str | int = "token_mean"  # token-level: every demo token weighs equally
+    # Algorithm FACT, not a knob (ClassVar): NLL has no ratio, so the trainer
+    # skips the pi_old recompute pass in fit_batch.
+    needs_old_logprobs: ClassVar[bool] = False
 
 
 def sft_loss(policy_logprobs: Tensor, batch: Batch, cfg: SFTConfig) -> tuple[Tensor, dict]:

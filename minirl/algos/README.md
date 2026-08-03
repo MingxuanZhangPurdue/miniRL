@@ -11,7 +11,7 @@ loss_fn, cfg = make_loss("dr_grpo", loss_agg=1024)        # paper-exact Dr. GRPO
 ```
 
 **File-vs-config rule**: an algorithm gets its own `.py` only when its loss
-BODY differs from GRPO's (gspo, cispo do). If it is reachable by setting
+BODY differs from GRPO's (gspo, cispo, dppo do). If it is reachable by setting
 GRPO's config fields, it is a NAMED CONFIG in the `LOSSES` registry (dapo,
 dr_grpo) — the diff between two entries below IS the diff between the papers.
 
@@ -46,6 +46,7 @@ k3   = e^d - d - 1,  d = log pi_ref - log pi_theta                   unbiased KL
 | **GRPO** (arXiv:2402.03300) | `"grpo"` | grpo.py | `L_t = -min( r_t·A_i , clip(r_t, 1-eps, 1+eps_hi)·A_i )` `[+ beta·k3]` | `"seq_mean"` |
 | **GSPO** (arXiv:2507.18071) | `"gspo"` | gspo.py | same surrogate with `s_i` in place of `r_t` (one ratio per SEQUENCE); eps ~3e-4 | `"seq_mean"` |
 | **CISPO** (arXiv:2506.13585) | `"cispo"` | cispo.py | `L_t = -sg( clip(r_t, -inf, 1+eps_hi) ) · A_i · log pi_theta(y_t)` — clipped tokens KEEP gradient | `"token_mean"` |
+| **DPPO** (arXiv:2602.04879) | `"dppo"`, `"dppo_kl"` | dppo.py | `L_t = -M_t · sg( min(r_t, C) ) · A_i · log pi_theta(y_t)` with `M_t = 0` iff moving away (`A_i>0, r_t>1` / `A_i<0, r_t<1`) AND binary divergence `D_t > delta`; `r_t` anchored to pi_engine, `old_logprobs` ignored, no TIS | `"token_mean"` |
 | **SFT** | `"sft"` | sft.py | `L_t = -log pi_theta(y_t)` on assistant tokens | `"token_mean"` |
 | **DAPO** (arXiv:2503.14476) | `"dapo"` | **config of GRPO** | GRPO with `eps_clip_high=0.28` (clip-higher), no KL (default) | `"token_mean"` |
 | **Dr. GRPO** (arXiv:2503.20783) | `"dr_grpo"` | **config of GRPO** | GRPO with `grpo_std_normalization=False` (no ÷std in A_i) | `"token_mean"`; paper-exact: `loss_agg=<max_new_tokens>` |
@@ -65,6 +66,12 @@ decision; additive terms inherit the reduce by linearity — see grpo.py).
 | `"seq_mean"` | `L = (1/B) · sum_i ( sum_t L_t / tokens_i )` | GRPO | every COMPLETION weighs equally |
 | `"token_mean"` | `L = sum_i sum_t L_t / (total tokens)` | DAPO | every TOKEN weighs equally; denom varies with sampling |
 | `int C` | `L = sum_i sum_t L_t / (B·C)` | Dr. GRPO | constant denom ⇒ unbiased wrt sampled lengths |
+
+DPPO's fields differ (no ratio window, no TIS): `delta` (divergence threshold —
+0.2 for `"binary_tv"`, 0.05 for `"binary_kl"`; the `"dppo_kl"` entry keeps the
+pair consistent), `divergence`, `ratio_cap` (C, the detached-weight cap), plus
+the shared `grpo_std_normalization` (default **False** — the paper's advantage
+is the group-mean baseline without ÷std) and `loss_agg`.
 
 ## Supported configuration fields (GRPOConfig; gspo/cispo carry the same minus KL)
 

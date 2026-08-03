@@ -93,8 +93,9 @@ class TrainConfig:
 
 
 class Trainer:
-    """fit_batch(batch) runs one update phase: recompute old_logprobs, then
-    ppo_epochs x shuffled minibatches x microbatch-accumulated optimizer steps.
+    """fit_batch(batch) runs one update phase: recompute old_logprobs (if the
+    loss needs them), then ppo_epochs x shuffled minibatches x
+    microbatch-accumulated optimizer steps.
 
     Works on 1..m GPUs from one code path: construct AFTER the process group
     exists and DDP engages automatically; without a process group it
@@ -161,7 +162,10 @@ class Trainer:
         # Tier-1 rule: pi_old = the learner AT UPDATE START, recomputed here in
         # fp32 — never conflated with engine behavior_logprobs (which stay in
         # the batch for TIS). One no-grad pass; cheap next to the update itself.
-        batch.old_logprobs = self.compute_logprobs(batch)  # (B, T) f32, no grad
+        # Losses that declare needs_old_logprobs=False (engine-anchored DPPO,
+        # ratio-free SFT) never read pi_old — skip the pass.
+        if getattr(self.loss_cfg, "needs_old_logprobs", True):
+            batch.old_logprobs = self.compute_logprobs(batch)  # (B, T) f32, no grad
 
         step_metrics: list[dict] = []
         for _ in range(self.cfg.ppo_epochs):

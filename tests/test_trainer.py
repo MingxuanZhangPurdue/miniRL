@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from minirl.algos import GRPOConfig, SFTConfig, grpo_loss, sft_loss
+from minirl.algos import GRPOConfig, SFTConfig, grpo_loss, make_loss, sft_loss
 from minirl.rollout.batching import iter_microbatches, iter_minibatches, make_batch
 from minirl.rollout.types import Trajectory
 from tests.fake_trainer import TrainConfig, Trainer, gather_logprobs
@@ -171,6 +171,25 @@ def test_multiple_epochs_go_off_policy_and_clip_engages_machinery():
     metrics = trainer.fit_batch(batch)
     assert metrics["approx_kl"] > 0  # later steps train off the frozen old_logprobs
     assert any(not torch.equal(a, b) for a, b in zip(before, trainer.model.parameters()))
+
+
+def test_needs_old_logprobs_false_skips_the_recompute():
+    """The dependency declaration: a loss config with needs_old_logprobs=False
+    (DPPO, SFT) must make fit_batch skip the pi_old pass entirely — the batch
+    field stays None — while training still steps. GRPO's default keeps the
+    recompute (test_first_step_is_on_policy asserts the field is filled)."""
+    loss_fn, cfg = make_loss("dppo")
+    trainer = new_trainer(loss_fn, cfg)
+    batch, _ = make_batch(make_trajs(), pad_id=0)
+    before = [p.detach().clone() for p in trainer.model.parameters()]
+    metrics = trainer.fit_batch(batch)
+    assert batch.old_logprobs is None  # skipped, not just ignored
+    assert "div_mean" in metrics  # the dppo loss actually ran
+    assert any(not torch.equal(a, b) for a, b in zip(before, trainer.model.parameters()))
+
+    batch_sft, _ = make_batch(make_trajs(), pad_id=0)
+    new_trainer(sft_loss, SFTConfig()).fit_batch(batch_sft)
+    assert batch_sft.old_logprobs is None
 
 
 def test_sft_overfits_a_fixed_batch():

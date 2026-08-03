@@ -105,8 +105,9 @@ class MegatronTrainConfig:
 
 
 class MegatronTrainer:
-    """fit_batch(batch) = recompute old_logprobs, then ppo_epochs x shuffled
-    minibatches, each one forward_backward_func call microbatched by Megatron.
+    """fit_batch(batch) = recompute old_logprobs (if the loss needs them),
+    then ppo_epochs x shuffled minibatches, each one forward_backward_func
+    call microbatched by Megatron.
 
     Construct AFTER setup_distributed() (torchrun) and torch.cuda.set_device.
     The model comes from the HF name via Megatron-Bridge — there is no
@@ -198,7 +199,11 @@ class MegatronTrainer:
         # pi_old = the learner AT UPDATE START, recomputed here — never
         # conflated with engine behavior_logprobs (which stay in the batch
         # for TIS). One no-grad pass; cheap next to the update itself.
-        batch.old_logprobs = self.compute_logprobs(batch)  # (B, T) f32, no grad
+        # Losses that declare needs_old_logprobs=False (engine-anchored DPPO,
+        # ratio-free SFT) never read pi_old — skip the pass. Every rank holds
+        # the same loss_cfg, so the collective is skipped consistently.
+        if getattr(self.loss_cfg, "needs_old_logprobs", True):
+            batch.old_logprobs = self.compute_logprobs(batch)  # (B, T) f32, no grad
 
         step_metrics: list[dict] = []
         for _ in range(self.cfg.ppo_epochs):

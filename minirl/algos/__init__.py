@@ -14,6 +14,7 @@ from functools import partial
 from minirl.algos.advantage import degenerate_group_mask, grpo_advantages
 from minirl.algos.aggregate import aggregate_loss, masked_mean, minibatch_denom
 from minirl.algos.cispo import CISPOConfig, cispo_loss
+from minirl.algos.dppo import DPPOConfig, dppo_loss
 from minirl.algos.grpo import GRPOConfig, grpo_loss
 from minirl.algos.gspo import GSPOConfig, gspo_loss
 from minirl.algos.sft import SFTConfig, sft_loss
@@ -23,6 +24,7 @@ LOSSES = {
     "grpo": (grpo_loss, GRPOConfig),
     "gspo": (gspo_loss, GSPOConfig),
     "cispo": (cispo_loss, CISPOConfig),
+    "dppo": (dppo_loss, DPPOConfig),
     "sft": (sft_loss, SFTConfig),
     # ---- NAMED CONFIGS (file-vs-config rule: their loss bodies == GRPO's) ----
     # DAPO (arXiv:2503.14476): clip-higher + token-level reduce; no-KL is
@@ -33,6 +35,10 @@ LOSSES = {
     # reduce. PAPER-EXACT normalization needs the constant denominator, a
     # runtime setting we can't preset: make_loss("dr_grpo", loss_agg=<max_new_tokens>).
     "dr_grpo": (grpo_loss, partial(GRPOConfig, grpo_std_normalization=False, loss_agg="token_mean")),
+    # DPPO Binary-KL (same paper as "dppo"): the Bernoulli-KL gate. delta moves
+    # with the divergence because TV and KL live on different scales (the
+    # paper's pairings: TV 0.2 <-> KL 0.05); a named config keeps them paired.
+    "dppo_kl": (dppo_loss, partial(DPPOConfig, divergence="binary_kl", delta=0.05)),
 }
 
 
@@ -54,9 +60,11 @@ __all__ = [
     "grpo_loss",
     "gspo_loss",
     "cispo_loss",
+    "dppo_loss",
     "sft_loss",
     "GRPOConfig",
     "GSPOConfig",
     "CISPOConfig",
+    "DPPOConfig",
     "SFTConfig",
 ]
