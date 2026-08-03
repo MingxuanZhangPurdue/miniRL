@@ -1,6 +1,10 @@
-"""On-box VLLMEngine validation — run FIRST on a CUDA machine, 1 GPU is enough.
+"""On-box engine validation — run FIRST on a CUDA machine, 1 GPU is enough.
 
-    python recipes/04_smoke_vllm_cuda.py
+    python recipes/04_smoke_vllm_cuda.py [--gpu N]
+
+The engine runs as a SERVER PROCESS behind an EngineProxy — the exact
+transport training uses — so this smoke validates the socket contract and
+the file-based weight publish along with the engine itself.
 
 Executes the async_tier2.md §7 on-box checklist items in order, fail-loud:
 
@@ -17,6 +21,7 @@ Executes the async_tier2.md §7 on-box checklist items in order, fail-loud:
 """
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 
@@ -25,7 +30,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from minirl.vllm_engine import VLLMEngine
+from minirl.engine_proxy import launch_engine_servers
 from minirl.rollout.types import SamplingParams
 from tests.fake_trainer import Trainer, TrainConfig, gather_logprobs  # noqa: F401 — diagnostic learner (the spec fake)
 
@@ -42,6 +47,8 @@ def greedy(engine, prompt_ids, max_new_tokens=64):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--gpu", type=int, default=0,
+                    help="which GPU the engine server pins (avoid squatted GPUs)")
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.9,
                     help="lower it when the GPU is shared (desktop / colocated trainer)")
     args = ap.parse_args()
@@ -49,8 +56,14 @@ def main() -> None:
     tok = AutoTokenizer.from_pretrained(MODEL)
     prompt_ids = tok(PROMPT, return_tensors="pt").input_ids[0]
 
+    print("== 0. engine server ==")
+    stack = contextlib.ExitStack()
+    (engine,) = stack.enter_context(launch_engine_servers(
+        MODEL, [args.gpu], gpu_memory_utilization=args.gpu_memory_utilization))
+    engine.wait_ready()
+    print(f"   PASS: server up on GPU {args.gpu}, proxy connected (pad_id={engine.pad_id})")
+
     print("== 1. streaming contract ==")
-    engine = VLLMEngine(MODEL, gpu_memory_utilization=args.gpu_memory_utilization)
     engine.load_weights(
         AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.float32).state_dict().items(),
         version=0,
@@ -122,6 +135,7 @@ def main() -> None:
     assert torch.equal(restored.input_ids, base.input_ids), "restore is not byte-identical"
     print("   PASS: perturb changes output, restore is byte-identical")
 
+    stack.close()
     print("\nALL SMOKE CHECKS PASSED — the engine is safe to train against.")
 
 

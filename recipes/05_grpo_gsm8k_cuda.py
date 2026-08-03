@@ -6,22 +6,23 @@
     torchrun --nproc-per-node=2 recipes/05_grpo_gsm8k_cuda.py --train-gpus 2 --rollout-gpus 2
     # + wandb:  ... --wandb --project miniRL_tests --name box-2x2
 
-Layout (slime's non-colocated ordering): trainer
-ranks take GPUs 0..t-1 (torchrun LOCAL_RANK == GPU id), engines take
-t..t+r-1 via VLLMEngine(gpu_id=...). Rank 0 owns the engines + collection;
-followers train. Run recipes/04_smoke_vllm_cuda.py FIRST on a fresh box.
+Layout (slime's non-colocated topology): trainer ranks take GPUs 0..t-1
+(torchrun LOCAL_RANK == GPU id); engines take t..t+r-1 as SERVER PROCESSES
+(launch_engine_servers pins each one via its env), launched by rank 0
+before the trainer so they warm up while Megatron builds. Rank 0 owns the
+proxies + collection; followers train. Run recipes/04_smoke_vllm_cuda.py
+FIRST on a fresh box.
 
 The learner is Megatron-Core end to end (minirl/megatron.py): the model is
 built FROM the HF name by Megatron-Bridge — no transformers learner object
-exists in this script. ORDER MATTERS twice:
-  1. setup_distributed() BEFORE MegatronTrainer (it asserts the process
-     group and initializes model parallelism);
-  2. the trainer touches CUDA BEFORE any engine is built (engine pinning
-     mutates CUDA_VISIBLE_DEVICES around construction; CUDA reads the env
-     once at context creation).
+exists in this script, and no vllm import either (engines live in their
+own processes, possibly their own venv — $MINIRL_ENGINE_PYTHON).
+setup_distributed() comes BEFORE MegatronTrainer (it asserts the process
+group and initializes model parallelism).
 """
 
 import argparse
+import contextlib
 import os
 import sys
 from dataclasses import asdict
@@ -38,7 +39,7 @@ from minirl.config import DataConfig, EvalConfig, PlacementConfig, RolloutConfig
 from minirl.train_async import fit_async
 from minirl.data import HFPromptSource, gsm8k_row
 from minirl.eval import EvalSet, make_eval_prompts
-from minirl.vllm_engine import VLLMEngine
+from minirl.engine_proxy import launch_engine_servers
 from minirl.metrics import metrics_logger
 from minirl.megatron import MegatronTrainConfig, MegatronTrainer, setup_distributed
 from minirl.rewards import make_math_reward_fn
@@ -109,16 +110,22 @@ def main() -> None:
                           rollout_max_prompt_len=args.rollout_max_prompt_len,
                           enable_thinking=args.enable_thinking)
 
-    # trainer FIRST: Megatron initializes model parallelism + the CUDA
-    # context before any engine mutates CUDA_VISIBLE_DEVICES.
+    # engine servers FIRST: separate processes on the rollout GPUs, warming
+    # up while Megatron builds. Proxies connect lazily — wait_ready below.
+    stack = contextlib.ExitStack()
+    engines = []
+    if rank == 0:
+        engines = stack.enter_context(launch_engine_servers(
+            MODEL, placement.rollout_gpu_ids,
+            max_model_len=args.rollout_max_context_len))
+
     trainer = MegatronTrainer(MODEL, grpo_loss, loss_cfg, train_cfg)
 
-    engines, prompt_source, reward_fn, run = [], None, None, None
+    prompt_source, reward_fn, run = None, None, None
     eval_sets, eval_cfg = [], None
     if rank == 0:
-        engines = [VLLMEngine(MODEL, gpu_id=g, seed=g,
-                              max_model_len=args.rollout_max_context_len)
-                   for g in placement.rollout_gpu_ids]
+        for e in engines:
+            e.wait_ready()
         tok = AutoTokenizer.from_pretrained(MODEL)
         ds = load_dataset("openai/gsm8k", "main", split="train")
         prompt_source = HFPromptSource(ds, tok, data_cfg, row_fn=gsm8k_row)
@@ -162,6 +169,7 @@ def main() -> None:
             eval_cfg=eval_cfg,
         )
     finally:
+        stack.close()  # shut the engine servers down before wandb wraps up
         if run is not None:
             run.finish()
     if rank == 0:

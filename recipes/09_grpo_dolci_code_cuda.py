@@ -22,12 +22,14 @@ asserts, run in the level-2 sandbox; 1.0 iff the process exits cleanly
 the fence is HOW the reward finds the code, so the format instruction is
 part of the reward spec (math's boxed-answer, code edition).
 
-Same layout rules as recipe 05: trainer ranks first, engines after
-(placement mutates CUDA_VISIBLE_DEVICES around construction), trainer built
-BEFORE any engine, setup_distributed() before the trainer.
+Same layout rules as recipe 05: trainer ranks own the first GPUs; engines
+are SERVER PROCESSES on the rest (each server's env pins its GPU), launched
+by rank 0 BEFORE the trainer so they warm up while Megatron builds.
+setup_distributed() before the trainer.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -45,7 +47,7 @@ from minirl.config import DataConfig, EvalConfig, PlacementConfig, RolloutConfig
 from minirl.train_async import fit_async
 from minirl.data import HFPromptSource
 from minirl.eval import EvalSet, make_eval_prompts
-from minirl.vllm_engine import VLLMEngine
+from minirl.engine_proxy import launch_engine_servers
 from minirl.metrics import metrics_logger
 from minirl.megatron import MegatronTrainConfig, MegatronTrainer, setup_distributed
 from minirl.rewards import make_code_reward_fn
@@ -182,16 +184,22 @@ def main() -> None:
                           rollout_max_prompt_len=args.rollout_max_prompt_len,
                           enable_thinking=args.enable_thinking)
 
-    # trainer FIRST: Megatron initializes model parallelism + the CUDA
-    # context before any engine mutates CUDA_VISIBLE_DEVICES.
+    # engine servers FIRST: separate processes on the rollout GPUs, warming
+    # up while Megatron builds. Proxies connect lazily — wait_ready below.
+    stack = contextlib.ExitStack()
+    engines = []
+    if rank == 0:
+        engines = stack.enter_context(launch_engine_servers(
+            MODEL, placement.rollout_gpu_ids,
+            max_model_len=args.rollout_max_context_len))
+
     trainer = MegatronTrainer(MODEL, grpo_loss, loss_cfg, train_cfg)
 
-    engines, prompt_source, reward_fn, run = [], None, None, None
+    prompt_source, reward_fn, run = None, None, None
     eval_sets, eval_cfg = [], None
     if rank == 0:
-        engines = [VLLMEngine(MODEL, gpu_id=g, seed=g,
-                              max_model_len=args.rollout_max_context_len)
-                   for g in placement.rollout_gpu_ids]
+        for e in engines:
+            e.wait_ready()
         tok = AutoTokenizer.from_pretrained(MODEL)
         ds = load_dataset(data_cfg.prompt_data, split="train").filter(is_assert_style)
         print(f"dataset: {len(ds)} assert-style rows (stdin/stdout rows filtered out)")
@@ -235,6 +243,7 @@ def main() -> None:
             eval_cfg=eval_cfg,
         )
     finally:
+        stack.close()  # shut the engine servers down before wandb wraps up
         if run is not None:
             run.finish()
     if rank == 0:

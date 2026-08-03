@@ -39,13 +39,13 @@ import platform
 import tempfile
 
 import torch
-from safetensors.torch import save_file
 from torch import Tensor
 from transformers import AutoTokenizer
 from vllm import EngineArgs, LLMEngine
 from vllm import SamplingParams as VSP
 from vllm.inputs import TokensPrompt
 
+from minirl.engine_proxy import save_named_tensors
 from minirl.rollout.types import SamplingParams, Trajectory
 
 
@@ -217,30 +217,23 @@ class VLLMEngine:
     # ---------------- weight updates (drain-then-publish ONLY) ----------------
 
     def load_weights(self, named_tensors, version: int) -> None:
-        """Publish learner weights into the RUNNING engine. Engine must be idle.
+        """Publish learner weights into the RUNNING engine. Engine must be idle."""
+        with tempfile.TemporaryDirectory() as td:
+            save_named_tensors(named_tensors, os.path.join(td, "learner.safetensors"))
+            self.load_weights_path(td, version)
 
-        Path-based and 100% vLLM-native: the state dict is written to a
-        safetensors file and the WORKER loads it — no tensor serialization
-        over RPC. The worker's `reload_weights` RPC (v1/worker/gpu_worker.py)
-        `weights_path=` mode points its own model loader at our directory:
-        it globs the *.safetensors, streams them through model.load_weights,
-        and warns if any expected weight was missing.
+    def load_weights_path(self, weights_dir: str, version: int) -> None:
+        """Reload from a directory of safetensors the CALLER wrote — the server
+        half of the file-based publish (EngineProxy writes, this end loads).
+
+        100% vLLM-native: the worker's `reload_weights` RPC
+        (v1/worker/gpu_worker.py) `weights_path=` mode points its own model
+        loader at the directory: it globs the *.safetensors, streams them
+        through model.load_weights, and warns if any expected weight was
+        missing.
         """
         assert not self._pending, "load_weights during in-flight generation (drain first)"
-        # Ship each STORAGE once: tied weights (Qwen: lm_head <- embed_tokens)
-        # are aliases, and safetensors refuses aliased tensors. Loaders
-        # re-tie on their side: vLLM skips lm_head for tied configs.
-        tensors: dict[str, Tensor] = {}
-        seen: set[int] = set()
-        for k, v in named_tensors:
-            ptr = v.untyped_storage().data_ptr()
-            if ptr in seen:
-                continue
-            seen.add(ptr)
-            tensors[k] = v.detach().cpu().contiguous()
-        with tempfile.TemporaryDirectory() as td:
-            save_file(tensors, os.path.join(td, "learner.safetensors"))
-            self.engine.collective_rpc("reload_weights", kwargs={"weights_path": td})
+        self.engine.collective_rpc("reload_weights", kwargs={"weights_path": weights_dir})
         self.version = version
 
     def _to_traj(self, req_out, group: dict) -> Trajectory:
