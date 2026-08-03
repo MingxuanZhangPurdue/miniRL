@@ -121,6 +121,11 @@ def main() -> None:
                     help="local layer spec instead of Transformer-Engine (also disables "
                          "packing, which needs TE varlen kernels) — for environments "
                          "where TE's prebuilt kernels fail")
+    ap.add_argument("--micro-batch-size", type=int, default=8,
+                    help="sequences per fwd/bwd (the grad-accum unit when not packing). "
+                         "The padded path materializes a (micro, T, vocab) fp32 logits "
+                         "buffer per microbatch — use 1-2 for long responses without "
+                         "packing")
     ap.add_argument("--eval-interval", type=int, default=20,
                     help="score the MBPP test split every N iterations (plus an "
                          "untrained baseline); None = no eval")
@@ -160,7 +165,8 @@ def main() -> None:
         tis_mode="clamp"
     )
     train_cfg = MegatronTrainConfig(
-        lr=args.lr, ppo_epochs=1, minibatch_size=b, micro_batch_size=8,
+        lr=args.lr, ppo_epochs=1, minibatch_size=b,
+        micro_batch_size=args.micro_batch_size,
         bf16=not args.fp32, use_te_layers=not args.no_te,
         pack_max_tokens=None if args.no_te else args.pack_max_tokens,
     )
