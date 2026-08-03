@@ -145,6 +145,12 @@ class MegatronTrainer:
         provider.params_dtype = torch.bfloat16 if cfg.bf16 else torch.float32
         if not cfg.use_te_layers:
             provider.transformer_layer_spec = local_layer_spec
+        # fused weight-grad accumulation is an apex CUDA extension; without it
+        # ColumnParallelLinear refuses to construct rather than fall back.
+        try:
+            import fused_weight_gradient_mlp_cuda  # noqa: F401
+        except ImportError:
+            provider.gradient_accumulation_fusion = False
         provider.finalize()
         # bridge >= 0.5 providers read PP/TP roles off self._pg_collection and
         # only their (deprecated) provide_distributed_model sets it; we build
